@@ -6,14 +6,24 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		C7CA9496308A852B007AC5B5 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C7CA948F308A852B007AC5B5 /* Assets.xcassets */; };
+		C7CA949A308A852B007AC5B5 /* MeshManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7CA9493308A852B007AC5B5 /* MeshManager.swift */; };
+		C7CA949C308A8DE4007AC5B5 /* SoundListenerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7CA949B308A8DE4007AC5B5 /* SoundListenerManager.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		C7B6C8B3308A7F5500D5AB0C /* EmergencyMesh.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EmergencyMesh.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C7CA948F308A852B007AC5B5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		C7CA9492308A852B007AC5B5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C7CA9493308A852B007AC5B5 /* MeshManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshManager.swift; sourceTree = "<group>"; };
+		C7CA949B308A8DE4007AC5B5 /* SoundListenerManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundListenerManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		C7B6C8B5308A7F5500D5AB0C /* EmergencyMesh */ = {
+		C7CA949D308A8E5C007AC5B5 /* Views */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = EmergencyMesh;
+			path = Views;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,7 +42,7 @@
 		C7B6C8AA308A7F5500D5AB0C = {
 			isa = PBXGroup;
 			children = (
-				C7B6C8B5308A7F5500D5AB0C /* EmergencyMesh */,
+				C7CA9494308A852B007AC5B5 /* EmergencyMesh */,
 				C7B6C8B4308A7F5500D5AB0C /* Products */,
 			);
 			sourceTree = "<group>";
@@ -43,6 +53,26 @@
 				C7B6C8B3308A7F5500D5AB0C /* EmergencyMesh.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		C7CA9494308A852B007AC5B5 /* EmergencyMesh */ = {
+			isa = PBXGroup;
+			children = (
+				C7CA949D308A8E5C007AC5B5 /* Views */,
+				C7CA9495308A852B007AC5B5 /* Managers */,
+				C7CA948F308A852B007AC5B5 /* Assets.xcassets */,
+				C7CA9492308A852B007AC5B5 /* Info.plist */,
+			);
+			path = EmergencyMesh;
+			sourceTree = "<group>";
+		};
+		C7CA9495308A852B007AC5B5 /* Managers */ = {
+			isa = PBXGroup;
+			children = (
+				C7CA949B308A8DE4007AC5B5 /* SoundListenerManager.swift */,
+				C7CA9493308A852B007AC5B5 /* MeshManager.swift */,
+			);
+			path = Managers;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -61,7 +91,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				C7B6C8B5308A7F5500D5AB0C /* EmergencyMesh */,
+				C7CA949D308A8E5C007AC5B5 /* Views */,
 			);
 			name = EmergencyMesh;
 			packageProductDependencies = (
@@ -109,6 +139,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C7CA9496308A852B007AC5B5 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -119,6 +150,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C7CA949A308A852B007AC5B5 /* MeshManager.swift in Sources */,
+				C7CA949C308A8DE4007AC5B5 /* SoundListenerManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

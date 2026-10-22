@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>EmergencyMesh uses local mesh to connect peers offline.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>EmergencyMesh checks ambient decibel spikes on-device.</string>
+    <key>NSNearbyInteractionUsageDescription</key>
+    <string>EmergencyMesh uses UWB to locate distressed peers.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_emerg-mesh._tcp</string>
+        <string>_emerg-mesh._udp</string>
+    </array>
+</dict>
+</plist>
