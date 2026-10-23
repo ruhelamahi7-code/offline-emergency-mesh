@@ -13,13 +13,20 @@ struct ContentView: View {
     @State private var activeEmergencySender: String? = nil
     @State private var showFinderSheet = false
 
+    // Callsign Alert State
+    @State private var showCallsignAlert = false
+    @State private var callsignInputText = ""
+
     var body: some View {
         NavigationStack {
             ZStack {
                 Color(.systemGroupedBackground)
                     .ignoresSafeArea()
 
-                VStack(spacing: 12) {
+                VStack(spacing: 10) {
+                    // Profile Callsign Bar
+                    callsignProfileBar
+
                     // Layer 1: Pinned Active Critical SOS Alert
                     if let activeEmergency = activeEmergencyMessage {
                         pinnedSOSBanner(message: activeEmergency)
@@ -63,6 +70,15 @@ struct ContentView: View {
                     meshManager: meshManager
                 )
             }
+            .alert("Edit Broadcast Callsign", isPresented: $showCallsignAlert) {
+                TextField("Callsign (e.g. Survivor-42)", text: $callsignInputText)
+                Button("Cancel", role: .cancel) {}
+                Button("Save") {
+                    meshManager.updateUserCallsign(callsignInputText)
+                }
+            } message: {
+                Text("Set a distinct identifier so nearby rescue devices recognize you across the offline mesh.")
+            }
             .onAppear {
                 setupEventCallbacks()
                 soundManager.startListening()
@@ -94,6 +110,52 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Callsign Profile Bar
+
+    private var callsignProfileBar: some View {
+        HStack {
+            Button(action: {
+                callsignInputText = meshManager.userCallsign
+                showCallsignAlert = true
+            }) {
+                HStack(spacing: 5) {
+                    Image(systemName: "person.crop.circle.badge.checkmark")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+
+                    Text("Callsign: \(meshManager.userCallsign)")
+                        .font(.caption.bold())
+                        .foregroundColor(.primary)
+
+                    Image(systemName: "pencil")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color(.secondarySystemBackground))
+                .cornerRadius(8)
+            }
+
+            Spacer()
+
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(meshManager.connectedPeers.isEmpty ? Color.orange : Color.green)
+                    .frame(width: 8, height: 8)
+                Text(meshManager.connectedPeers.isEmpty ? "Mesh: Scanning" : "\(meshManager.connectedPeers.count) Peer(s) Live")
+                    .font(.caption.bold())
+                    .foregroundColor(meshManager.connectedPeers.isEmpty ? .orange : .green)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color(.secondarySystemBackground))
+            .cornerRadius(8)
+        }
+        .padding(.horizontal)
+        .padding(.top, 4)
+    }
+
     // MARK: - Header Status Bar
 
     private var headerStatusBar: some View {
@@ -101,21 +163,13 @@ struct ContentView: View {
             Image(systemName: soundManager.isListening ? "ear.and.waveform" : "ear.badge.exclamationmark")
                 .foregroundColor(soundManager.isListening ? .green : .orange)
 
-            Text(soundManager.isListening ? "Neural Sound Guard Active" : "Sound Guard Paused")
+            Text(soundManager.isListening ? "Neural Acoustic Guard Active" : "Sound Guard Paused")
                 .font(.subheadline.bold())
                 .foregroundColor(.primary)
 
             Spacer()
-
-            Circle()
-                .fill(meshManager.connectedPeers.isEmpty ? Color.orange : Color.green)
-                .frame(width: 8, height: 8)
-            Text(meshManager.connectedPeers.isEmpty ? "Searching Peers..." : "\(meshManager.connectedPeers.count) Peer(s) Online")
-                .font(.caption.bold())
-                .foregroundColor(.secondary)
         }
         .padding(.horizontal)
-        .padding(.top, 2)
     }
 
     // MARK: - Layer 1: Pinned SOS Alert
@@ -125,15 +179,22 @@ struct ContentView: View {
             HStack {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundColor(.white)
-                Text("ACTIVE CRITICAL EMERGENCY")
-                    .font(.caption.bold())
-                    .foregroundColor(.white)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("ACTIVE CRITICAL EMERGENCY")
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
+                    if let sender = activeEmergencySender {
+                        Text(sender == "Me" ? "From: You (\(meshManager.userCallsign))" : "From: \(sender)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.85))
+                    }
+                }
 
                 Spacer()
 
                 Button(action: {
                     withAnimation {
-                        let ackMessage = "✅ [RESOLVED] Emergency acknowledged & handled by \(UIDevice.current.name)."
+                        let ackMessage = "✅ [RESOLVED] Emergency acknowledged & handled by \(meshManager.userCallsign)."
                         meshManager.send(message: ackMessage, isEncrypted: true)
                         activeEmergencyMessage = nil
                         activeEmergencySender = nil
@@ -156,7 +217,7 @@ struct ContentView: View {
                 .lineLimit(2)
 
             Button(action: {
-                if let sender = activeEmergencySender {
+                if let sender = activeEmergencySender, sender != "Me" {
                     interactionManager.selectActivePeer(sender)
                 }
                 showFinderSheet = true
@@ -296,6 +357,8 @@ struct ContentView: View {
                         activeEmergencyMessage = latest.content
                         if latest.senderID != "Me" {
                             activeEmergencySender = latest.senderID
+                        } else {
+                            activeEmergencySender = "Me"
                         }
                     }
 
@@ -319,7 +382,7 @@ struct ContentView: View {
                          msg.content.contains("HAZARD") || msg.content.contains("WATER") ||
                          msg.content.contains("MEDICAL") || msg.content.contains("FOOD")
         let isSafe = msg.content.contains("SAFE") || msg.content.contains("RESOLVED")
-        let isMe = msg.senderID == "Me"
+        let isMe = msg.senderID == "Me" || msg.senderID == meshManager.userCallsign
 
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -327,13 +390,13 @@ struct ContentView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(isCritical ? .red : (isSafe ? .green : .blue))
 
-                // Hop count indicator
-                Text(isMe ? "Direct Broadcast" : (msg.hops == 0 ? "Direct from \(msg.senderID)" : "Relayed via \(msg.hops) \(msg.hops == 1 ? "hop" : "hops")"))
+                // Sender / Hop badge
+                Text(isMe ? "You" : (msg.hops == 0 ? "Direct from \(msg.senderID)" : "\(msg.senderID) (\(msg.hops) hop\(msg.hops == 1 ? "" : "s"))"))
                     .font(.system(size: 9, weight: .semibold))
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
-                    .background(Color(.secondarySystemBackground))
-                    .foregroundColor(.secondary)
+                    .background(isMe ? Color.blue.opacity(0.15) : Color(.secondarySystemBackground))
+                    .foregroundColor(isMe ? .blue : .secondary)
                     .cornerRadius(4)
 
                 if msg.isEncrypted {
@@ -386,12 +449,12 @@ struct ContentView: View {
     private var quickResourceGridSection: some View {
         VStack(spacing: 6) {
             HStack(spacing: 6) {
-                resourceButton(title: "💧 Need Water", message: "🚨 [SOS WATER] Water rations requested from \(UIDevice.current.name)!")
-                resourceButton(title: "🩹 Need Medical", message: "🚨 [SOS MEDICAL] Medical aid requested from \(UIDevice.current.name)!")
+                resourceButton(title: "💧 Need Water", message: "🚨 [SOS WATER] Water rations requested from \(meshManager.userCallsign)!")
+                resourceButton(title: "🩹 Need Medical", message: "🚨 [SOS MEDICAL] Medical aid requested from \(meshManager.userCallsign)!")
             }
             HStack(spacing: 6) {
-                resourceButton(title: "🍞 Need Food", message: "🚨 [SOS FOOD] Food rations requested from \(UIDevice.current.name)!")
-                resourceButton(title: "🟢 I Am Safe", message: "🟢 [STATUS SAFE] Verified safe status reported by \(UIDevice.current.name).")
+                resourceButton(title: "🍞 Need Food", message: "🚨 [SOS FOOD] Food rations requested from \(meshManager.userCallsign)!")
+                resourceButton(title: "🟢 I Am Safe", message: "🟢 [STATUS SAFE] Verified safe status reported by \(meshManager.userCallsign).")
             }
         }
         .padding(.horizontal)
@@ -443,7 +506,7 @@ struct ContentView: View {
 
     private func triggerEmergencyConsensus(reason: String) {
         let timestamp = Date().formatted(date: .omitted, time: .standard)
-        let alertMessage = "🚨 [SOS HAZARD] Acoustic Sound Analysis detected \(reason) at \(timestamp) from \(UIDevice.current.name)."
+        let alertMessage = "🚨 [SOS HAZARD] Acoustic Sound Analysis detected \(reason) at \(timestamp) from \(meshManager.userCallsign)."
         activeEmergencyMessage = alertMessage
         activeEmergencySender = "Me"
         isEmergencyTriggered = true
@@ -702,8 +765,4 @@ struct DirectionalFinderSheet: View {
         isSimulating = false
     }
     #endif
-}
-
-#Preview {
-    ContentView()
 }

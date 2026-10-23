@@ -16,6 +16,7 @@ import UIKit
 enum MeshPacketType: String, Codable {
     case message
     case discoveryToken
+    case heartbeat
 }
 
 // MARK: - Mesh Packet
@@ -46,16 +47,28 @@ struct RoutedMessage: Identifiable, Equatable {
 
 class MeshManager: NSObject, ObservableObject {
     private let serviceType = "emerg-mesh"
-    
-    // Append a random 4-digit salt to guarantee distinct peer names across identical devices
-    public let myPeerID = MCPeerID(displayName: "\(UIDevice.current.name) [\(String(Int.random(in: 1000...9999)))]")
-    
-    private let serviceAdvertiser: MCNearbyServiceAdvertiser
-    private let serviceBrowser: MCNearbyServiceBrowser
-    private let session: MCSession
+    private static let userCallsignKey = "EmergencyMesh_UserCallsign"
+
+    static func getStoredCallsign() -> String {
+        if let saved = UserDefaults.standard.string(forKey: userCallsignKey),
+           !saved.trimmingCharacters(in: .whitespaces).isEmpty {
+            return saved
+        }
+        let fallback = "Survivor-\(Int.random(in: 100...999))"
+        UserDefaults.standard.set(fallback, forKey: userCallsignKey)
+        return fallback
+    }
+
+    @Published var userCallsign: String
+    public private(set) var myPeerID: MCPeerID
+
+    private var serviceAdvertiser: MCNearbyServiceAdvertiser
+    private var serviceBrowser: MCNearbyServiceBrowser
+    private var session: MCSession
 
     private var seenPacketIDs: Set<UUID> = []
     private let cacheLock = NSLock()
+    private var heartbeatTimer: Timer?
 
     // Shared mesh symmetric key (AES-256 GCM)
     public var symmetricKey: SymmetricKey = {
@@ -76,22 +89,57 @@ class MeshManager: NSObject, ObservableObject {
     var localDiscoveryTokenProvider: ((MCPeerID) -> Data?)?
 
     override init() {
-        session = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
-        serviceAdvertiser = MCNearbyServiceAdvertiser(peer: myPeerID, discoveryInfo: nil, serviceType: serviceType)
-        serviceBrowser = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
+        let callsign = Self.getStoredCallsign()
+        self.userCallsign = callsign
+        let peer = MCPeerID(displayName: callsign)
+        self.myPeerID = peer
+
+        self.session = MCSession(peer: peer, securityIdentity: nil, encryptionPreference: .required)
+        self.serviceAdvertiser = MCNearbyServiceAdvertiser(peer: peer, discoveryInfo: nil, serviceType: serviceType)
+        self.serviceBrowser = MCNearbyServiceBrowser(peer: peer, serviceType: serviceType)
 
         super.init()
 
-        session.delegate = self
-        serviceAdvertiser.delegate = self
-        serviceBrowser.delegate = self
+        self.session.delegate = self
+        self.serviceAdvertiser.delegate = self
+        self.serviceBrowser.delegate = self
 
         startNetworking()
+        startHeartbeat()
     }
 
     deinit {
+        stopHeartbeat()
         stopNetworking()
     }
+
+    // MARK: - Callsign Management
+
+    func updateUserCallsign(_ newCallsign: String) {
+        let trimmed = newCallsign.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != userCallsign else { return }
+
+        UserDefaults.standard.set(trimmed, forKey: Self.userCallsignKey)
+        self.userCallsign = trimmed
+
+        stopHeartbeat()
+        stopNetworking()
+
+        let newPeer = MCPeerID(displayName: trimmed)
+        self.myPeerID = newPeer
+        self.session = MCSession(peer: newPeer, securityIdentity: nil, encryptionPreference: .required)
+        self.serviceAdvertiser = MCNearbyServiceAdvertiser(peer: newPeer, discoveryInfo: nil, serviceType: serviceType)
+        self.serviceBrowser = MCNearbyServiceBrowser(peer: newPeer, serviceType: serviceType)
+
+        self.session.delegate = self
+        self.serviceAdvertiser.delegate = self
+        self.serviceBrowser.delegate = self
+
+        startNetworking()
+        startHeartbeat()
+    }
+
+    // MARK: - Networking Lifecycle
 
     func startNetworking() {
         serviceAdvertiser.startAdvertisingPeer()
@@ -102,6 +150,38 @@ class MeshManager: NSObject, ObservableObject {
         serviceAdvertiser.stopAdvertisingPeer()
         serviceBrowser.stopBrowsingForPeers()
         session.disconnect()
+    }
+
+    // MARK: - Heartbeat Timer (prevents socket sleep)
+
+    private func startHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+            self?.sendHeartbeat()
+        }
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+    }
+
+    private func sendHeartbeat() {
+        guard !session.connectedPeers.isEmpty else { return }
+        let ping = MeshPacket(
+            id: UUID(),
+            senderID: myPeerID.displayName,
+            timestamp: Date(),
+            ttl: 1,
+            isEncrypted: false,
+            payload: Data([0x01]),
+            packetType: .heartbeat
+        )
+
+        _ = registerPacketIfUnseen(id: ping.id)
+        if let data = try? JSONEncoder().encode(ping) {
+            try? session.send(data, toPeers: session.connectedPeers, with: .unreliable)
+        }
     }
 
     // MARK: - Thread-Safe Deduplication Cache
@@ -295,6 +375,16 @@ extension MeshManager: MCSessionDelegate {
                 self.receivedPeerTokens.removeValue(forKey: peerID.displayName)
                 self.onPeerDisconnected?(peerID)
 
+                // Auto-healing recovery check after 2 seconds
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    guard let self = self else { return }
+                    print("[MeshManager] Auto-healing check: cycling advertiser & browser...")
+                    self.serviceBrowser.stopBrowsingForPeers()
+                    self.serviceAdvertiser.stopAdvertisingPeer()
+                    self.serviceAdvertiser.startAdvertisingPeer()
+                    self.serviceBrowser.startBrowsingForPeers()
+                }
+
             case .connecting:
                 print("Connecting to peer: \(peerID.displayName)...")
 
@@ -311,6 +401,11 @@ extension MeshManager: MCSessionDelegate {
 
         // Loop Prevention: Register packet ID and drop duplicates
         guard registerPacketIfUnseen(id: packet.id) else {
+            return
+        }
+
+        // Heartbeat keep-alive: silently drop without adding to UI feed
+        if packet.packetType == .heartbeat {
             return
         }
 

@@ -20,12 +20,10 @@ class InteractionManager: NSObject, ObservableObject {
     @Published var activePeerName: String? = nil
     @Published var availableTrackedPeers: [String] = []
 
-    // Persistent shared session for warming up local discovery token
-    private let localSharedSession = NISession()
-
-    // Multi-peer storage: Separate NISession per connected peer
+    // Multi-peer storage: Separate NISession and config per connected peer
     private var peerSessions: [String: NISession] = [:]
     private var peerTokens: [String: NIDiscoveryToken] = [:]
+    private var peerConfigurations: [String: NINearbyPeerConfiguration] = [:]
     public var peerMeasurements: [String: (distance: Float?, direction: simd_float3?)] = [:]
 
     // Haptics
@@ -46,30 +44,27 @@ class InteractionManager: NSObject, ObservableObject {
     override init() {
         super.init()
         isUWBSupported = InteractionManager.checkUWBSupport()
-        if isUWBSupported {
-            localSharedSession.delegate = self
-        }
         hapticGenerator.prepare()
     }
 
     deinit {
         stopHapticPulse()
-        localSharedSession.invalidate()
         for session in peerSessions.values {
             session.invalidate()
         }
         peerSessions.removeAll()
+        peerConfigurations.removeAll()
     }
 
     // MARK: - Token Management for Multi-Peer Mesh
 
-    /// Retrieves or generates a serialized discovery token for a specific peer
+    /// Retrieves or generates a serialized discovery token for a specific peer session
     func token(for peerID: MCPeerID) -> Data? {
         guard isUWBSupported else { return nil }
 
-        // Read the discoveryToken from the persistent warmed-up shared session
-        guard let token = localSharedSession.discoveryToken else {
-            print("[InteractionManager] Warning: localSharedSession.discoveryToken is nil during token exchange for \(peerID.displayName)")
+        let session = getOrCreateSession(for: peerID.displayName)
+        guard let token = session.discoveryToken else {
+            print("[InteractionManager] Warning: discoveryToken is nil for \(peerID.displayName)")
             return nil
         }
 
@@ -102,7 +97,9 @@ class InteractionManager: NSObject, ObservableObject {
             peerTokens[peerID.displayName] = token
 
             let session = getOrCreateSession(for: peerID.displayName)
+            session.delegate = self
             let config = NINearbyPeerConfiguration(peerToken: token)
+            peerConfigurations[peerID.displayName] = config
             session.run(config)
 
             DispatchQueue.main.async {
@@ -140,6 +137,7 @@ class InteractionManager: NSObject, ObservableObject {
             session.invalidate()
         }
         peerTokens.removeValue(forKey: displayName)
+        peerConfigurations.removeValue(forKey: displayName)
         peerMeasurements.removeValue(forKey: displayName)
 
         DispatchQueue.main.async {
@@ -224,12 +222,16 @@ extension InteractionManager: NISessionDelegate {
 
         DispatchQueue.main.async {
             if let peerName = matchedPeerName {
-                self.peerMeasurements[peerName] = (peerObject.distance, peerObject.direction)
+                // Direction fallback: if UWB reports nil direction (e.g. held flat/obstructed), retain previous direction or use forward vector
+                let fallbackDir = self.peerMeasurements[peerName]?.direction ?? simd_float3(x: 0, y: 1, z: 0)
+                let resolvedDirection = peerObject.direction ?? fallbackDir
+
+                self.peerMeasurements[peerName] = (peerObject.distance, resolvedDirection)
 
                 if self.activePeerName == nil || self.activePeerName == peerName {
                     self.activePeerName = peerName
                     self.distance = peerObject.distance
-                    self.direction = peerObject.direction
+                    self.direction = resolvedDirection
                     self.updateHaptics(for: peerObject.distance)
                 }
             }
@@ -255,13 +257,18 @@ extension InteractionManager: NISessionDelegate {
     }
 
     func sessionSuspensionEnded(_ session: NISession) {
-        // Automatically resumes
+        // Automatically restart session using saved configuration
+        if let matchedPeerName = peerSessions.first(where: { $0.value === session })?.key,
+           let config = peerConfigurations[matchedPeerName] {
+            session.run(config)
+        }
     }
 
     func session(_ session: NISession, didInvalidateWith error: Error) {
         let matchedPeerName = peerSessions.first(where: { $0.value === session })?.key
         if let peerName = matchedPeerName {
             peerSessions.removeValue(forKey: peerName)
+            peerConfigurations.removeValue(forKey: peerName)
         }
     }
 }
