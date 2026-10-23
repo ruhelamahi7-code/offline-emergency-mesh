@@ -5,7 +5,7 @@
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>EmergencyMesh uses Bluetooth to discover and maintain peer-to-peer mesh connectivity offline.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>EmergencyMesh uses local network Wi-Fi/P2P to communicate with nearby devices.</string>
+	<string>EmergencyMesh uses local Wi-Fi direct networking to keep the mesh active.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>EmergencyMesh analyzes ambient sound waves in RAM to classify emergencies like alarms or screams.</string>
 	<key>NSNearbyInteractionUsageDescription</key>

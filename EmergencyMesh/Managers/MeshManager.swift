@@ -47,15 +47,15 @@ struct RoutedMessage: Identifiable, Equatable {
 
 class MeshManager: NSObject, ObservableObject {
     private let serviceType = "emerg-mesh"
-    private static let userCallsignKey = "EmergencyMesh_UserCallsign"
+    private static let callsignKey = "user_callsign"
 
     static func getStoredCallsign() -> String {
-        if let saved = UserDefaults.standard.string(forKey: userCallsignKey),
+        if let saved = UserDefaults.standard.string(forKey: callsignKey),
            !saved.trimmingCharacters(in: .whitespaces).isEmpty {
             return saved
         }
         let fallback = "Survivor-\(Int.random(in: 100...999))"
-        UserDefaults.standard.set(fallback, forKey: userCallsignKey)
+        UserDefaults.standard.set(fallback, forKey: callsignKey)
         return fallback
     }
 
@@ -115,11 +115,11 @@ class MeshManager: NSObject, ObservableObject {
 
     // MARK: - Callsign Management
 
-    func updateUserCallsign(_ newCallsign: String) {
-        let trimmed = newCallsign.trimmingCharacters(in: .whitespaces)
+    func updateCallsign(_ newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, trimmed != userCallsign else { return }
 
-        UserDefaults.standard.set(trimmed, forKey: Self.userCallsignKey)
+        UserDefaults.standard.set(trimmed, forKey: Self.callsignKey)
         self.userCallsign = trimmed
 
         stopHeartbeat()
@@ -152,11 +152,11 @@ class MeshManager: NSObject, ObservableObject {
         session.disconnect()
     }
 
-    // MARK: - Heartbeat Timer (prevents socket sleep)
+    // MARK: - 3-Second Keep-Alive Heartbeat (AWDL Radio Keep-Alive)
 
     private func startHeartbeat() {
         heartbeatTimer?.invalidate()
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.sendHeartbeat()
         }
     }
@@ -360,7 +360,7 @@ extension MeshManager: MCSessionDelegate {
                 if let tokenData = self.localDiscoveryTokenProvider?(peerID) {
                     self.sendDiscoveryToken(tokenData, to: peerID)
                 } else {
-                    // Retry after 0.5s if local UWB token wasn't ready at instant of connection
+                    // 0.5s delayed retry if local UWB token wasn't ready at instant of connection
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                         guard let self = self else { return }
                         if let retryToken = self.localDiscoveryTokenProvider?(peerID) {
@@ -375,14 +375,16 @@ extension MeshManager: MCSessionDelegate {
                 self.receivedPeerTokens.removeValue(forKey: peerID.displayName)
                 self.onPeerDisconnected?(peerID)
 
-                // Auto-healing recovery check after 2 seconds
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    guard let self = self else { return }
-                    print("[MeshManager] Auto-healing check: cycling advertiser & browser...")
-                    self.serviceBrowser.stopBrowsingForPeers()
-                    self.serviceAdvertiser.stopAdvertisingPeer()
-                    self.serviceAdvertiser.startAdvertisingPeer()
-                    self.serviceBrowser.startBrowsingForPeers()
+                // If mesh has dropped all links, automatically restart browsing and advertising after 1.0s delay
+                if session.connectedPeers.isEmpty {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        guard let self = self, self.session.connectedPeers.isEmpty else { return }
+                        print("[MeshManager] Auto-reconnect triggered: recycling advertiser and browser...")
+                        self.serviceBrowser.stopBrowsingForPeers()
+                        self.serviceAdvertiser.stopAdvertisingPeer()
+                        self.serviceAdvertiser.startAdvertisingPeer()
+                        self.serviceBrowser.startBrowsingForPeers()
+                    }
                 }
 
             case .connecting:

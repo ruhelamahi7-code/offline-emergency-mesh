@@ -74,7 +74,7 @@ struct ContentView: View {
                 TextField("Callsign (e.g. Survivor-42)", text: $callsignInputText)
                 Button("Cancel", role: .cancel) {}
                 Button("Save") {
-                    meshManager.updateUserCallsign(callsignInputText)
+                    meshManager.updateCallsign(callsignInputText)
                 }
             } message: {
                 Text("Set a distinct identifier so nearby rescue devices recognize you across the offline mesh.")
@@ -123,7 +123,7 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundColor(.blue)
 
-                    Text("Callsign: \(meshManager.userCallsign)")
+                    Text("Your Callsign: \(meshManager.userCallsign)")
                         .font(.caption.bold())
                         .foregroundColor(.primary)
 
