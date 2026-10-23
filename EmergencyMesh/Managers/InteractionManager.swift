@@ -20,7 +20,7 @@ class InteractionManager: NSObject, ObservableObject {
     @Published var activePeerName: String? = nil
     @Published var availableTrackedPeers: [String] = []
 
-    // Multi-peer storage: Separate NISession and config per connected peer
+    // Multi-peer storage: Separate active NISession and configuration per connected peer
     private var peerSessions: [String: NISession] = [:]
     private var peerTokens: [String: NIDiscoveryToken] = [:]
     private var peerConfigurations: [String: NINearbyPeerConfiguration] = [:]
@@ -58,7 +58,6 @@ class InteractionManager: NSObject, ObservableObject {
 
     // MARK: - Token Management for Multi-Peer Mesh
 
-    /// Retrieves or generates a serialized discovery token for a specific peer session
     func token(for peerID: MCPeerID) -> Data? {
         guard isUWBSupported else { return nil }
 
@@ -81,7 +80,6 @@ class InteractionManager: NSObject, ObservableObject {
         return newSession
     }
 
-    /// Handles a received discovery token from a peer and initiates real-time ranging
     func receiveToken(peerID: MCPeerID, tokenData: Data) {
         guard isUWBSupported else {
             print("[InteractionManager] UWB not supported on this device.")
@@ -176,7 +174,7 @@ class InteractionManager: NSObject, ObservableObject {
     }
     #endif
 
-    // MARK: - Haptic Heartbeat Feedback
+    // MARK: - Haptic Feedback
 
     private func updateHaptics(for distance: Float?) {
         guard let dist = distance, dist < 2.0, dist > 0 else {
@@ -184,7 +182,6 @@ class InteractionManager: NSObject, ObservableObject {
             return
         }
 
-        // Pulse rate increases as distance drops below 2 meters (0.2s interval at 0.1m, 1.2s interval at 2.0m)
         let clamped = max(0.1, min(2.0, dist))
         let normalized = Double((clamped - 0.1) / 1.9)
         let newInterval = 0.20 + (normalized * 1.0)
@@ -217,12 +214,10 @@ extension InteractionManager: NISessionDelegate {
     func session(_ session: NISession, didUpdate nearbyObjects: [NINearbyObject]) {
         guard let peerObject = nearbyObjects.first else { return }
 
-        // Find which peer this session belongs to
         let matchedPeerName = peerSessions.first(where: { $0.value === session })?.key
 
         DispatchQueue.main.async {
             if let peerName = matchedPeerName {
-                // Direction fallback: if UWB reports nil direction (e.g. held flat/obstructed), retain previous direction or use forward vector
                 let fallbackDir = self.peerMeasurements[peerName]?.direction ?? simd_float3(x: 0, y: 1, z: 0)
                 let resolvedDirection = peerObject.direction ?? fallbackDir
 
@@ -257,7 +252,6 @@ extension InteractionManager: NISessionDelegate {
     }
 
     func sessionSuspensionEnded(_ session: NISession) {
-        // Automatically restart session using saved configuration
         if let matchedPeerName = peerSessions.first(where: { $0.value === session })?.key,
            let config = peerConfigurations[matchedPeerName] {
             session.run(config)

@@ -25,7 +25,7 @@ struct MeshPacket: Codable, Identifiable {
     var id: UUID = UUID()
     var senderID: String
     var timestamp: Date = Date()
-    var ttl: Int = 3
+    var ttl: Int = 5 // Increased default to 5 hops
     var isEncrypted: Bool
     var payload: Data
     var packetType: MeshPacketType = .message
@@ -48,6 +48,7 @@ struct RoutedMessage: Identifiable, Equatable {
 class MeshManager: NSObject, ObservableObject {
     private let serviceType = "emerg-mesh"
     private static let callsignKey = "user_callsign"
+    private static let peerIDArchiveKey = "user_peer_id_archive"
 
     static func getStoredCallsign() -> String {
         if let saved = UserDefaults.standard.string(forKey: callsignKey),
@@ -57,6 +58,19 @@ class MeshManager: NSObject, ObservableObject {
         let fallback = "Survivor-\(Int.random(in: 100...999))"
         UserDefaults.standard.set(fallback, forKey: callsignKey)
         return fallback
+    }
+
+    static func getOrCreatePeerID(callsign: String) -> MCPeerID {
+        if let data = UserDefaults.standard.data(forKey: peerIDArchiveKey),
+           let peerID = try? NSKeyedUnarchiver.unarchivedObject(ofClass: MCPeerID.self, from: data),
+           peerID.displayName == callsign {
+            return peerID
+        }
+        let newPeerID = MCPeerID(displayName: callsign)
+        if let archived = try? NSKeyedArchiver.archivedData(withRootObject: newPeerID, requiringSecureCoding: true) {
+            UserDefaults.standard.set(archived, forKey: peerIDArchiveKey)
+        }
+        return newPeerID
     }
 
     @Published var userCallsign: String
@@ -91,7 +105,7 @@ class MeshManager: NSObject, ObservableObject {
     override init() {
         let callsign = Self.getStoredCallsign()
         self.userCallsign = callsign
-        let peer = MCPeerID(displayName: callsign)
+        let peer = Self.getOrCreatePeerID(callsign: callsign)
         self.myPeerID = peer
 
         self.session = MCSession(peer: peer, securityIdentity: nil, encryptionPreference: .required)
@@ -115,17 +129,21 @@ class MeshManager: NSObject, ObservableObject {
 
     // MARK: - Callsign Management
 
-    func updateCallsign(_ newName: String) {
-        let trimmed = newName.trimmingCharacters(in: .whitespaces)
+    func updateCallsign(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, trimmed != userCallsign else { return }
 
         UserDefaults.standard.set(trimmed, forKey: Self.callsignKey)
         self.userCallsign = trimmed
 
+        let newPeer = MCPeerID(displayName: trimmed)
+        if let archived = try? NSKeyedArchiver.archivedData(withRootObject: newPeer, requiringSecureCoding: true) {
+            UserDefaults.standard.set(archived, forKey: Self.peerIDArchiveKey)
+        }
+
         stopHeartbeat()
         stopNetworking()
 
-        let newPeer = MCPeerID(displayName: trimmed)
         self.myPeerID = newPeer
         self.session = MCSession(peer: newPeer, securityIdentity: nil, encryptionPreference: .required)
         self.serviceAdvertiser = MCNearbyServiceAdvertiser(peer: newPeer, discoveryInfo: nil, serviceType: serviceType)
@@ -137,6 +155,10 @@ class MeshManager: NSObject, ObservableObject {
 
         startNetworking()
         startHeartbeat()
+    }
+
+    func updateUserCallsign(_ name: String) {
+        updateCallsign(name)
     }
 
     // MARK: - Networking Lifecycle
@@ -152,11 +174,11 @@ class MeshManager: NSObject, ObservableObject {
         session.disconnect()
     }
 
-    // MARK: - 3-Second Keep-Alive Heartbeat (AWDL Radio Keep-Alive)
+    // MARK: - 3.5s Keep-Alive Heartbeat (AWDL Radio Keep-Alive)
 
     private func startHeartbeat() {
         heartbeatTimer?.invalidate()
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             self?.sendHeartbeat()
         }
     }
@@ -180,7 +202,11 @@ class MeshManager: NSObject, ObservableObject {
 
         _ = registerPacketIfUnseen(id: ping.id)
         if let data = try? JSONEncoder().encode(ping) {
-            try? session.send(data, toPeers: session.connectedPeers, with: .unreliable)
+            let targetPeers = session.connectedPeers
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self = self else { return }
+                try? self.session.send(data, toPeers: targetPeers, with: .unreliable)
+            }
         }
     }
 
@@ -230,7 +256,7 @@ class MeshManager: NSObject, ObservableObject {
             id: UUID(),
             senderID: myPeerID.displayName,
             timestamp: Date(),
-            ttl: 3,
+            ttl: 5,
             isEncrypted: isEncrypted,
             payload: payloadData,
             packetType: .message
@@ -271,7 +297,9 @@ class MeshManager: NSObject, ObservableObject {
 
         _ = registerPacketIfUnseen(id: packet.id)
         if let data = try? JSONEncoder().encode(packet) {
-            try? session.send(data, toPeers: [peer], with: .reliable)
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                try? self?.session.send(data, toPeers: [peer], with: .reliable)
+            }
         }
     }
 
@@ -289,17 +317,24 @@ class MeshManager: NSObject, ObservableObject {
 
         _ = registerPacketIfUnseen(id: packet.id)
         if let data = try? JSONEncoder().encode(packet) {
-            try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
+            let targetPeers = session.connectedPeers
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                try? self?.session.send(data, toPeers: targetPeers, with: .reliable)
+            }
         }
     }
 
     private func broadcastPacket(_ packet: MeshPacket) {
         guard !session.connectedPeers.isEmpty else { return }
-        do {
-            let data = try JSONEncoder().encode(packet)
-            try session.send(data, toPeers: session.connectedPeers, with: .reliable)
-        } catch {
-            print("Failed to broadcast packet: \(error.localizedDescription)")
+        guard let data = try? JSONEncoder().encode(packet) else { return }
+        let targetPeers = session.connectedPeers
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            do {
+                try self?.session.send(data, toPeers: targetPeers, with: .reliable)
+            } catch {
+                print("Failed to broadcast packet: \(error.localizedDescription)")
+            }
         }
     }
 }
@@ -313,7 +348,6 @@ extension MeshManager: MCNearbyServiceAdvertiserDelegate {
         withContext context: Data?,
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
-        // Automatically accept invitations from nearby emergency mesh participants
         invitationHandler(true, session)
     }
 }
@@ -330,9 +364,7 @@ extension MeshManager: MCNearbyServiceBrowserDelegate {
         foundPeer peerID: MCPeerID,
         withDiscoveryInfo info: [String: String]?
     ) {
-        // Deterministic tie-breaker to prevent simultaneous mutual invitations from colliding between devices
         let shouldInvite = myPeerID.displayName > peerID.displayName
-
         if shouldInvite {
             print("Inviting peer: \(peerID.displayName)")
             browser.invitePeer(peerID, to: session, withContext: nil, timeout: 15)
@@ -356,11 +388,12 @@ extension MeshManager: MCSessionDelegate {
             switch state {
             case .connected:
                 print("Connected to peer: \(peerID.displayName)")
-                // Send our discovery token directly to the newly connected peer
+                // Discovery throttle: stop browsing to clear 2.4GHz spectrum for data; keep advertiser active
+                self.serviceBrowser.stopBrowsingForPeers()
+
                 if let tokenData = self.localDiscoveryTokenProvider?(peerID) {
                     self.sendDiscoveryToken(tokenData, to: peerID)
                 } else {
-                    // 0.5s delayed retry if local UWB token wasn't ready at instant of connection
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                         guard let self = self else { return }
                         if let retryToken = self.localDiscoveryTokenProvider?(peerID) {
@@ -375,14 +408,11 @@ extension MeshManager: MCSessionDelegate {
                 self.receivedPeerTokens.removeValue(forKey: peerID.displayName)
                 self.onPeerDisconnected?(peerID)
 
-                // If mesh has dropped all links, automatically restart browsing and advertising after 1.0s delay
+                // If all peers are disconnected, resume browsing after 1.5s delay to heal link
                 if session.connectedPeers.isEmpty {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                         guard let self = self, self.session.connectedPeers.isEmpty else { return }
-                        print("[MeshManager] Auto-reconnect triggered: recycling advertiser and browser...")
-                        self.serviceBrowser.stopBrowsingForPeers()
-                        self.serviceAdvertiser.stopAdvertisingPeer()
-                        self.serviceAdvertiser.startAdvertisingPeer()
+                        print("[MeshManager] Auto-reconnect triggered: resuming browser...")
                         self.serviceBrowser.startBrowsingForPeers()
                     }
                 }
@@ -406,7 +436,7 @@ extension MeshManager: MCSessionDelegate {
             return
         }
 
-        // Heartbeat keep-alive: silently drop without adding to UI feed
+        // Heartbeat keep-alive: silently drop immediately without adding to UI feed
         if packet.packetType == .heartbeat {
             return
         }
@@ -417,7 +447,6 @@ extension MeshManager: MCSessionDelegate {
                 self.receivedPeerTokens[packet.senderID] = packet.payload
                 self.onTokenReceived?(peerID, packet.payload)
 
-                // Reciprocate token exchange if we haven't sent ours to this peer yet
                 if let myToken = self.localDiscoveryTokenProvider?(peerID) {
                     self.sendDiscoveryToken(myToken, to: peerID)
                 }
@@ -434,7 +463,7 @@ extension MeshManager: MCSessionDelegate {
         }
 
         if let content = messageText {
-            let hops = max(0, 3 - packet.ttl)
+            let hops = max(0, 5 - packet.ttl)
             let routed = RoutedMessage(
                 id: packet.id,
                 senderID: packet.senderID,
@@ -459,10 +488,8 @@ extension MeshManager: MCSessionDelegate {
             if let relayData = try? JSONEncoder().encode(relayPacket) {
                 let otherPeers = session.connectedPeers.filter { $0 != peerID }
                 if !otherPeers.isEmpty {
-                    do {
-                        try session.send(relayData, toPeers: otherPeers, with: .reliable)
-                    } catch {
-                        print("Failed to relay packet to other peers: \(error.localizedDescription)")
+                    DispatchQueue.global(qos: .utility).async { [weak self] in
+                        try? self?.session.send(relayData, toPeers: otherPeers, with: .reliable)
                     }
                 }
             }

@@ -70,7 +70,7 @@ struct ContentView: View {
                     meshManager: meshManager
                 )
             }
-            .alert("Edit Broadcast Callsign", isPresented: $showCallsignAlert) {
+            .alert("Edit Callsign", isPresented: $showCallsignAlert) {
                 TextField("Callsign (e.g. Survivor-42)", text: $callsignInputText)
                 Button("Cancel", role: .cancel) {}
                 Button("Save") {
@@ -89,22 +89,18 @@ struct ContentView: View {
     // MARK: - Wiring Up Event Callbacks
 
     private func setupEventCallbacks() {
-        // Automatic peer-to-peer UWB token provider
         meshManager.localDiscoveryTokenProvider = { peerID in
             return interactionManager.token(for: peerID)
         }
 
-        // On UWB token received from any peer in the mesh
         meshManager.onTokenReceived = { peerID, tokenData in
             interactionManager.receiveToken(peerID: peerID, tokenData: tokenData)
         }
 
-        // Clean up on peer disconnection
         meshManager.onPeerDisconnected = { peerID in
             interactionManager.removePeer(displayName: peerID.displayName)
         }
 
-        // On SoundAnalysis emergency sound verification
         soundManager.onEmergencySoundVerified = { detectedSound in
             triggerEmergencyConsensus(reason: detectedSound)
         }
@@ -123,7 +119,7 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundColor(.blue)
 
-                    Text("Your Callsign: \(meshManager.userCallsign)")
+                    Text("Callsign: \(meshManager.userCallsign)")
                         .font(.caption.bold())
                         .foregroundColor(.primary)
 
@@ -184,7 +180,7 @@ struct ContentView: View {
                         .font(.caption.bold())
                         .foregroundColor(.white)
                     if let sender = activeEmergencySender {
-                        Text(sender == "Me" ? "From: You (\(meshManager.userCallsign))" : "From: \(sender)")
+                        Text(sender == "Me" ? "From: You" : "From: \(sender)")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundColor(.white.opacity(0.85))
                     }
@@ -390,7 +386,6 @@ struct ContentView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(isCritical ? .red : (isSafe ? .green : .blue))
 
-                // Sender / Hop badge
                 Text(isMe ? "You" : (msg.hops == 0 ? "Direct from \(msg.senderID)" : "\(msg.senderID) (\(msg.hops) hop\(msg.hops == 1 ? "" : "s"))"))
                     .font(.system(size: 9, weight: .semibold))
                     .padding(.horizontal, 5)
@@ -657,7 +652,6 @@ struct DirectionalFinderSheet: View {
 
     private var uwbTrackingVisualizer: some View {
         ZStack {
-            // Radar concentric rings
             Circle()
                 .stroke(Color.blue.opacity(0.15), lineWidth: 2)
                 .frame(width: 220, height: 220)
@@ -671,7 +665,6 @@ struct DirectionalFinderSheet: View {
                 .frame(width: 80, height: 80)
 
             if let direction = interactionManager.direction {
-                // Calculate 2D pointing angle on the screen
                 let angle = Angle(radians: Double(atan2(direction.x, direction.y)))
 
                 Image(systemName: "location.north.fill")

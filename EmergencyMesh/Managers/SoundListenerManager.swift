@@ -16,7 +16,6 @@ class SoundListenerManager: NSObject, ObservableObject {
     @Published var localSoundSpikeDetected = false
     @Published var detectedEmergencySound: String? = nil
 
-    // Closures triggered when emergency sounds or spikes are recognized
     var onEmergencySoundVerified: ((String) -> Void)?
     var onSpikeDetected: (() -> Void)?
 
@@ -24,7 +23,9 @@ class SoundListenerManager: NSObject, ObservableObject {
     private var streamAnalyzer: SNAudioStreamAnalyzer?
     private let analysisQueue = DispatchQueue(label: "com.emergencymesh.soundanalysis", qos: .userInitiated)
 
-    // Emergency identifier keywords mapped to human-readable names
+    private var interruptionObserver: NSObjectProtocol?
+    private var routeChangeObserver: NSObjectProtocol?
+
     private let emergencySoundCatalog: [String: String] = [
         "fire_alarm": "Fire Alarm",
         "smoke_detector": "Smoke Detector",
@@ -32,10 +33,80 @@ class SoundListenerManager: NSObject, ObservableObject {
         "glass_breaking": "Glass Breaking"
     ]
 
+    override init() {
+        super.init()
+        setupAudioSessionObservers()
+    }
+
+    deinit {
+        if let obs = interruptionObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        if let obs = routeChangeObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        stopListening()
+    }
+
+    // MARK: - Notification Observers
+
+    private func setupAudioSessionObservers() {
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleInterruption(notification)
+        }
+
+        routeChangeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleRouteChange(notification)
+        }
+    }
+
+    private func handleInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+
+        switch type {
+        case .began:
+            print("[SoundListenerManager] Audio session interruption began. Pausing engine safely...")
+            audioEngine?.inputNode.removeTap(onBus: 0)
+            if audioEngine?.isRunning == true {
+                audioEngine?.pause()
+            }
+        case .ended:
+            print("[SoundListenerManager] Audio session interruption ended. Resuming engine...")
+            guard isListening else { return }
+            if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                if options.contains(.shouldResume) {
+                    setupAndStartEngine()
+                }
+            } else {
+                setupAndStartEngine()
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleRouteChange(_ notification: Notification) {
+        guard isListening else { return }
+        print("[SoundListenerManager] Audio route changed. Adapting engine to new route...")
+        setupAndStartEngine()
+    }
+
+    // MARK: - Engine Lifecycle
+
     func startListening() {
         guard !isListening else { return }
 
-        // Request microphone permission before starting engine
         if #available(iOS 17.0, *) {
             AVAudioApplication.requestRecordPermission { [weak self] granted in
                 guard granted else {
@@ -60,6 +131,14 @@ class SoundListenerManager: NSObject, ObservableObject {
     }
 
     private func setupAndStartEngine() {
+        // Stop any running instance before configuring
+        if let engine = audioEngine {
+            engine.inputNode.removeTap(onBus: 0)
+            if engine.isRunning {
+                engine.stop()
+            }
+        }
+
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
@@ -79,7 +158,7 @@ class SoundListenerManager: NSObject, ObservableObject {
             let classifyRequest = try SNClassifySoundRequest(classifierIdentifier: .version1)
             try analyzer.add(classifyRequest, withObserver: self)
 
-            // Pass nil to automatically adopt the node's native hardware bus format
+            // Pass nil to automatically adopt the node's native hardware bus format safely
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, when in
                 guard let self = self else { return }
 
@@ -136,7 +215,6 @@ class SoundListenerManager: NSObject, ObservableObject {
         }
     }
 
-    /// Simulation helper for manual testing or previewing without live sirens
     func simulateDetection(sound: String = "Fire Alarm") {
         DispatchQueue.main.async {
             self.detectedEmergencySound = sound
@@ -153,7 +231,6 @@ extension SoundListenerManager: SNResultsObserving {
     func request(_ request: SNRequest, didProduce result: SNResult) {
         guard let classificationResult = result as? SNClassificationResult else { return }
 
-        // Find matches in top predictions with confidence > 0.70
         for classification in classificationResult.classifications {
             let identifier = classification.identifier.lowercased()
             let confidence = classification.confidence
