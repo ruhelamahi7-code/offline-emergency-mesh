@@ -1,12 +1,17 @@
 import SwiftUI
 import MultipeerConnectivity
+import simd
 
 struct ContentView: View {
     @StateObject private var meshManager = MeshManager()
     @StateObject private var soundManager = SoundListenerManager()
+    @StateObject private var interactionManager = InteractionManager()
+
     @State private var messageText = ""
     @State private var isEmergencyTriggered = false
     @State private var activeEmergencyMessage: String? = nil
+    @State private var activeEmergencySender: String? = nil
+    @State private var showFinderSheet = false
 
     var body: some View {
         NavigationStack {
@@ -15,106 +20,195 @@ struct ContentView: View {
                     .ignoresSafeArea()
 
                 VStack(spacing: 12) {
-                    
-                    // Sticky Pinned SOS Card (Disappears across ALL phones when acknowledged)
+                    // Layer 1: Pinned Active Critical SOS Alert
                     if let activeEmergency = activeEmergencyMessage {
                         pinnedSOSBanner(message: activeEmergency)
                     }
 
-                    headerBannerSection
-                    decibelCardSection
-                    peersStatusSection
+                    // Header Status Bar (Mesh Peers & Acoustic Guard)
+                    headerStatusBar
+
+                    // Layer 2: Live On-Device ML Sound Guard Card
+                    soundAnalysisCard
+
+                    // Mesh Network Feed Header
+                    meshFeedHeader
+
+                    // Multi-hop Decrypted Mesh Feed
                     messageFeedSection
+
+                    // Quick SOS Resource Grid
                     quickResourceGridSection
+
+                    // Bottom Encrypted Broadcast Bar
                     broadcastBarSection
                 }
             }
             .navigationTitle("EmergencyMesh")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: {
+                        showFinderSheet = true
+                    }) {
+                        Image(systemName: "location.viewfinder")
+                            .font(.headline)
+                            .foregroundColor(.blue)
+                    }
+                }
+            }
+            .sheet(isPresented: $showFinderSheet) {
+                DirectionalFinderSheet(
+                    interactionManager: interactionManager,
+                    meshManager: meshManager
+                )
+            }
+            .onAppear {
+                setupEventCallbacks()
+                soundManager.startListening()
+            }
         }
     }
 
-    // MARK: - Sub-Views
+    // MARK: - Wiring Up Event Callbacks
 
-    private var headerBannerSection: some View {
+    private func setupEventCallbacks() {
+        // Automatic peer-to-peer UWB token provider
+        meshManager.localDiscoveryTokenProvider = { peerID in
+            return interactionManager.token(for: peerID)
+        }
+
+        // On UWB token received from any peer in the mesh
+        meshManager.onTokenReceived = { peerID, tokenData in
+            interactionManager.receiveToken(peerID: peerID, tokenData: tokenData)
+        }
+
+        // Clean up on peer disconnection
+        meshManager.onPeerDisconnected = { peerID in
+            interactionManager.removePeer(displayName: peerID.displayName)
+        }
+
+        // On SoundAnalysis emergency sound verification
+        soundManager.onEmergencySoundVerified = { detectedSound in
+            triggerEmergencyConsensus(reason: detectedSound)
+        }
+    }
+
+    // MARK: - Header Status Bar
+
+    private var headerStatusBar: some View {
         HStack {
             Image(systemName: soundManager.isListening ? "ear.and.waveform" : "ear.badge.exclamationmark")
                 .foregroundColor(soundManager.isListening ? .green : .orange)
-            
-            Text(soundManager.isListening ? "Acoustic Guard Active (RAM Buffer)" : "Acoustic Guard Paused")
+
+            Text(soundManager.isListening ? "Neural Sound Guard Active" : "Sound Guard Paused")
                 .font(.subheadline.bold())
                 .foregroundColor(.primary)
-            
+
             Spacer()
-            
+
             Circle()
-                .fill(meshManager.connectedPeers.count > 0 ? Color.green : Color.orange)
-                .frame(width: 10, height: 10)
-            Text(meshManager.connectedPeers.count > 0 ? "\(meshManager.connectedPeers.count) Peer(s)" : "No Peers")
+                .fill(meshManager.connectedPeers.isEmpty ? Color.orange : Color.green)
+                .frame(width: 8, height: 8)
+            Text(meshManager.connectedPeers.isEmpty ? "Searching Peers..." : "\(meshManager.connectedPeers.count) Peer(s) Online")
                 .font(.caption.bold())
                 .foregroundColor(.secondary)
         }
         .padding(.horizontal)
-        .padding(.top, 4)
+        .padding(.top, 2)
     }
 
+    // MARK: - Layer 1: Pinned SOS Alert
+
     private func pinnedSOSBanner(message: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundColor(.white)
                 Text("ACTIVE CRITICAL EMERGENCY")
                     .font(.caption.bold())
                     .foregroundColor(.white)
+
                 Spacer()
-                Button("Acknowledge") {
+
+                Button(action: {
                     withAnimation {
-                        // Broadcast resolution to ALL connected peers across the mesh
                         let ackMessage = "✅ [RESOLVED] Emergency acknowledged & handled by \(UIDevice.current.name)."
-                        meshManager.send(message: ackMessage)
+                        meshManager.send(message: ackMessage, isEncrypted: true)
                         activeEmergencyMessage = nil
+                        activeEmergencySender = nil
                         isEmergencyTriggered = false
                     }
+                }) {
+                    Text("Resolve & Broadcast")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.white)
+                        .foregroundColor(.red)
+                        .cornerRadius(6)
                 }
-                .font(.caption.bold())
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color.white)
-                .foregroundColor(.red)
-                .cornerRadius(6)
             }
-            
+
             Text(message)
                 .font(.subheadline)
                 .foregroundColor(.white)
+                .lineLimit(2)
+
+            Button(action: {
+                if let sender = activeEmergencySender {
+                    interactionManager.selectActivePeer(sender)
+                }
+                showFinderSheet = true
+            }) {
+                HStack {
+                    Image(systemName: "location.viewfinder")
+                    Text("Open UWB Precision Finder")
+                        .font(.caption.bold())
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.2))
+                .foregroundColor(.white)
+                .cornerRadius(6)
+            }
         }
         .padding(12)
         .background(Color.red)
         .cornerRadius(12)
-        .shadow(radius: 4, y: 2)
+        .shadow(color: Color.red.opacity(0.3), radius: 6, y: 2)
         .padding(.horizontal)
     }
 
-    private var decibelCardSection: some View {
-        VStack(spacing: 8) {
+    // MARK: - Layer 2: Live Sound Guard Card
+
+    private var soundAnalysisCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label("Ambient Sound Level", systemImage: "waveform")
+                Label("Apple Neural Engine SoundAnalysis", systemImage: "waveform.badge.magnifyingglass")
                     .font(.subheadline.bold())
                 Spacer()
-                Text(soundManager.isListening ? String(format: "%.1f dB", soundManager.currentDecibels) : "Paused")
-                    .font(.subheadline.monospaced())
-                    .foregroundColor(soundManager.currentDecibels > -15.0 ? .red : .primary)
+                if soundManager.isListening {
+                    Text(String(format: "%.1f dB", soundManager.currentDecibels))
+                        .font(.caption.monospaced().bold())
+                        .foregroundColor(soundManager.currentDecibels > -20.0 ? .red : .primary)
+                }
             }
-            
-            HStack(spacing: 12) {
+
+            Text(soundManager.isListening
+                 ? (soundManager.detectedEmergencySound != nil
+                    ? "Listening with Apple Neural Engine... Active / Last heard: \(soundManager.detectedEmergencySound!)"
+                    : "Listening with Apple Neural Engine... Active (Zero-Disk RAM Buffer)")
+                 : "Acoustic Guard Paused (Tap Start to enable on-device detection)")
+                .font(.caption)
+                .foregroundColor(soundManager.detectedEmergencySound != nil ? .red : .secondary)
+
+            HStack(spacing: 10) {
                 Button(action: {
                     if soundManager.isListening {
                         soundManager.stopListening()
                     } else {
                         soundManager.startListening()
-                        soundManager.onSpikeDetected = {
-                            triggerEmergencyConsensus()
-                        }
                     }
                 }) {
                     Text(soundManager.isListening ? "Stop Guard" : "Start Guard")
@@ -125,15 +219,15 @@ struct ContentView: View {
                         .foregroundColor(.white)
                         .cornerRadius(10)
                 }
-                
+
                 Button(action: {
-                    triggerEmergencyConsensus()
+                    soundManager.simulateDetection(sound: "Fire Alarm")
                 }) {
-                    Text("Simulate Spike")
+                    Text("Simulate Alarm")
                         .font(.subheadline.bold())
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(Color.red)
+                        .background(Color.red.opacity(0.9))
                         .foregroundColor(.white)
                         .cornerRadius(10)
                 }
@@ -141,43 +235,47 @@ struct ContentView: View {
         }
         .padding(12)
         .background(Color(.systemBackground))
-        .cornerRadius(16)
-        .shadow(radius: 2, y: 1)
+        .cornerRadius(14)
+        .shadow(color: Color.black.opacity(0.03), radius: 2, y: 1)
         .padding(.horizontal)
     }
 
-    private var peersStatusSection: some View {
+    // MARK: - Mesh Feed Header
+
+    private var meshFeedHeader: some View {
         HStack {
             Image(systemName: "antenna.radiowaves.left.and.right")
                 .foregroundColor(.blue)
-            Text("Mesh Network Feed")
+            Text("Multi-Hop Mesh Feed")
                 .font(.subheadline.bold())
             Spacer()
         }
         .padding(.horizontal)
     }
 
+    // MARK: - Mesh Messages Feed Section
+
     private var messageFeedSection: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if meshManager.receivedMessages.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    if meshManager.routedMessages.isEmpty {
                         VStack(spacing: 6) {
                             Image(systemName: "wifi.slash")
-                                .font(.system(size: 28))
+                                .font(.system(size: 26))
                                 .foregroundColor(.secondary)
-                            Text("Mesh active. Messages & alerts will appear here.")
+                            Text("Encrypted Mesh Active. Hop-routed alerts will appear here.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                         .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 20)
+                        .padding(.top, 16)
                     } else {
-                        ForEach(Array(meshManager.receivedMessages.enumerated()), id: \.offset) { index, msg in
-                            messageRow(for: msg, at: index)
+                        ForEach(meshManager.routedMessages) { msg in
+                            routedMessageRow(for: msg)
                         }
                     }
-                    
+
                     Color.clear
                         .frame(height: 1)
                         .id("BottomAnchor")
@@ -185,22 +283,26 @@ struct ContentView: View {
                 .padding(.horizontal)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onChange(of: meshManager.receivedMessages.count) {
+            .onChange(of: meshManager.routedMessages.count) {
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo("BottomAnchor", anchor: .bottom)
                 }
-                
-                if let latestMessage = meshManager.receivedMessages.last {
-                    // If an SOS arrives, display the red banner on this phone
-                    if latestMessage.contains("SOS") || latestMessage.contains("HAZARD") || latestMessage.contains("WATER") || latestMessage.contains("MEDICAL") || latestMessage.contains("FOOD") {
+
+                if let latest = meshManager.routedMessages.last {
+                    if latest.content.contains("SOS") || latest.content.contains("HAZARD") ||
+                       latest.content.contains("WATER") || latest.content.contains("MEDICAL") ||
+                       latest.content.contains("FOOD") {
                         isEmergencyTriggered = true
-                        activeEmergencyMessage = latestMessage
+                        activeEmergencyMessage = latest.content
+                        if latest.senderID != "Me" {
+                            activeEmergencySender = latest.senderID
+                        }
                     }
-                    
-                    // If an ACK/RESOLVED message arrives from ANY phone, clear the banner for everyone!
-                    if latestMessage.contains("RESOLVED") {
+
+                    if latest.content.contains("RESOLVED") {
                         withAnimation {
                             activeEmergencyMessage = nil
+                            activeEmergencySender = nil
                             isEmergencyTriggered = false
                         }
                     }
@@ -209,45 +311,85 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Routed Message Row
+
     @ViewBuilder
-    private func messageRow(for msg: String, at index: Int) -> some View {
-        let isCritical = msg.contains("🚨") || msg.contains("SOS") || msg.contains("HAZARD") || msg.contains("WATER") || msg.contains("MEDICAL") || msg.contains("FOOD")
-        let isSafe = msg.contains("SAFE") || msg.contains("RESOLVED")
-        let timestamp = Date().formatted(date: .omitted, time: .standard)
-        
+    private func routedMessageRow(for msg: RoutedMessage) -> some View {
+        let isCritical = msg.content.contains("🚨") || msg.content.contains("SOS") ||
+                         msg.content.contains("HAZARD") || msg.content.contains("WATER") ||
+                         msg.content.contains("MEDICAL") || msg.content.contains("FOOD")
+        let isSafe = msg.content.contains("SAFE") || msg.content.contains("RESOLVED")
+        let isMe = msg.senderID == "Me"
+
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(isCritical ? "CRITICAL ALERT" : (isSafe ? "STATUS UPDATE" : "Mesh Broadcast"))
+                Text(isCritical ? "CRITICAL ALERT" : (isSafe ? "STATUS UPDATE" : "MESH BROADCAST"))
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(isCritical ? .red : (isSafe ? .green : .blue))
+
+                // Hop count indicator
+                Text(isMe ? "Direct Broadcast" : (msg.hops == 0 ? "Direct from \(msg.senderID)" : "Relayed via \(msg.hops) \(msg.hops == 1 ? "hop" : "hops")"))
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color(.secondarySystemBackground))
+                    .foregroundColor(.secondary)
+                    .cornerRadius(4)
+
+                if msg.isEncrypted {
+                    HStack(spacing: 2) {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 8))
+                        Text("AES-GCM")
+                            .font(.system(size: 8, weight: .semibold))
+                    }
+                    .foregroundColor(.purple)
+                }
+
                 Spacer()
-                Text(timestamp)
-                    .font(.system(size: 10))
+
+                Text(msg.timestamp.formatted(date: .omitted, time: .standard))
+                    .font(.system(size: 9))
                     .foregroundColor(.secondary)
             }
-            
-            Text(msg)
-                .font(.system(.subheadline, design: .default))
+
+            Text(msg.content)
+                .font(.subheadline)
                 .foregroundColor(.primary)
+
+            if isCritical && !isMe {
+                Button(action: {
+                    interactionManager.selectActivePeer(msg.senderID)
+                    showFinderSheet = true
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "location.viewfinder")
+                        Text("Locate \(msg.senderID) via UWB")
+                    }
+                    .font(.caption.bold())
+                    .foregroundColor(.red)
+                }
+                .padding(.top, 2)
+            }
         }
-        .padding(12)
+        .padding(10)
         .background(isCritical ? Color.red.opacity(0.1) : (isSafe ? Color.green.opacity(0.1) : Color(.systemBackground)))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .stroke(isCritical ? Color.red.opacity(0.4) : (isSafe ? Color.green.opacity(0.4) : Color.clear), lineWidth: 1)
         )
         .cornerRadius(10)
-        .shadow(color: Color.black.opacity(0.02), radius: 2, y: 1)
-        .id(index)
     }
 
+    // MARK: - Quick Resource Buttons
+
     private var quickResourceGridSection: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                resourceButton(title: "💧 Need Water", message: "🚨 [SOS WATER] Water requested from \(UIDevice.current.name)!")
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                resourceButton(title: "💧 Need Water", message: "🚨 [SOS WATER] Water rations requested from \(UIDevice.current.name)!")
                 resourceButton(title: "🩹 Need Medical", message: "🚨 [SOS MEDICAL] Medical aid requested from \(UIDevice.current.name)!")
             }
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 resourceButton(title: "🍞 Need Food", message: "🚨 [SOS FOOD] Food rations requested from \(UIDevice.current.name)!")
                 resourceButton(title: "🟢 I Am Safe", message: "🟢 [STATUS SAFE] Verified safe status reported by \(UIDevice.current.name).")
             }
@@ -260,48 +402,306 @@ struct ContentView: View {
             if message.contains("SOS") {
                 isEmergencyTriggered = true
                 activeEmergencyMessage = message
+                activeEmergencySender = "Me"
             }
-            meshManager.send(message: message)
+            meshManager.send(message: message, isEncrypted: true)
         }) {
             Text(title)
-                .font(.subheadline.bold())
+                .font(.footnote.bold())
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
+                .padding(.vertical, 7)
                 .background(message.contains("SAFE") ? Color.green : Color.red)
                 .foregroundColor(.white)
                 .cornerRadius(8)
-                .shadow(radius: 1, y: 1)
         }
     }
 
+    // MARK: - Broadcast Bar
+
     private var broadcastBarSection: some View {
-        HStack(spacing: 12) {
-            TextField("Type emergency broadcast...", text: $messageText)
+        HStack(spacing: 8) {
+            TextField("Type encrypted mesh broadcast...", text: $messageText)
                 .textFieldStyle(RoundedBorderTextFieldStyle())
 
             Button(action: {
-                guard !messageText.isEmpty else { return }
-                meshManager.send(message: messageText)
+                guard !messageText.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+                meshManager.send(message: messageText, isEncrypted: true)
                 messageText = ""
             }) {
                 Image(systemName: "paperplane.fill")
-                    .padding(10)
+                    .padding(8)
                     .background(Color.blue)
                     .foregroundColor(.white)
                     .cornerRadius(8)
-                }
+            }
         }
         .padding(.horizontal)
-        .padding(.bottom, 8)
+        .padding(.bottom, 6)
     }
 
-    private func triggerEmergencyConsensus() {
-        isEmergencyTriggered = true
+    // MARK: - Emergency Consensus Trigger
+
+    private func triggerEmergencyConsensus(reason: String) {
         let timestamp = Date().formatted(date: .omitted, time: .standard)
-        let alertMessage = "🚨 [SOS HAZARD] Verified Acoustic Spike detected at \(timestamp) from \(UIDevice.current.name)."
+        let alertMessage = "🚨 [SOS HAZARD] Acoustic Sound Analysis detected \(reason) at \(timestamp) from \(UIDevice.current.name)."
         activeEmergencyMessage = alertMessage
-        meshManager.send(message: alertMessage)
+        activeEmergencySender = "Me"
+        isEmergencyTriggered = true
+        meshManager.send(message: alertMessage, isEncrypted: true)
     }
+}
+
+// MARK: - Layer 3: Directional Finder Sheet (NearbyInteraction / UWB)
+
+struct DirectionalFinderSheet: View {
+    @ObservedObject var interactionManager: InteractionManager
+    @ObservedObject var meshManager: MeshManager
+    @Environment(\.dismiss) private var dismiss
+
+    #if targetEnvironment(simulator)
+    @State private var isSimulating = false
+    @State private var simulationTimer: Timer?
+    @State private var simDistance: Float = 1.9
+    @State private var simAngle: Float = 0.0
+    #endif
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 20) {
+                // Header Details
+                VStack(spacing: 4) {
+                    Text("Layer 3 Precision Rescue")
+                        .font(.caption.bold())
+                        .foregroundColor(.blue)
+                    Text("Ultra Wideband Directional Finder")
+                        .font(.title3.bold())
+                }
+                .padding(.top, 8)
+
+                // Multi-Peer Selector Bar
+                if !interactionManager.availableTrackedPeers.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Select Peer to Track:")
+                            .font(.caption2.bold())
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal)
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(interactionManager.availableTrackedPeers, id: \.self) { peerName in
+                                    let isSelected = (interactionManager.activePeerName == peerName)
+                                    Button(action: {
+                                        interactionManager.selectActivePeer(peerName)
+                                    }) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "location.north.circle.fill")
+                                            Text(peerName)
+                                                .font(.caption.bold())
+                                        }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(isSelected ? Color.blue : Color(.secondarySystemBackground))
+                                        .foregroundColor(isSelected ? .white : .primary)
+                                        .cornerRadius(8)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                // UWB Hardware Support or Fallback Indicator
+                if !interactionManager.isUWBSupported {
+                    uwbFallbackCard
+                } else {
+                    uwbTrackingVisualizer
+                }
+
+                Spacer()
+
+                // Centimeter Distance Readout
+                VStack(spacing: 4) {
+                    if let peer = interactionManager.activePeerName {
+                        Text("Target: \(peer)")
+                            .font(.caption.bold())
+                            .foregroundColor(.blue)
+                    }
+
+                    if let distance = interactionManager.distance {
+                        Text(String(format: "%.1f m away", distance))
+                            .font(.system(size: 38, weight: .heavy, design: .rounded))
+                            .foregroundColor(.primary)
+
+                        Text(String(format: "(%d cm)", Int(distance * 100)))
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    } else if !interactionManager.isUWBSupported {
+                        Text("Mesh Signal Connected")
+                            .font(.title3.bold())
+                            .foregroundColor(.orange)
+                        Text("Centimeter UWB unavailable on this model")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Acquiring Real-Time UWB Signal...")
+                            .font(.title3.bold())
+                            .foregroundColor(.secondary)
+                        Text("Point your iPhone toward the peer to establish lock")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                // Simulator Mode helper (strictly compiled out on physical iPhones)
+                #if targetEnvironment(simulator)
+                VStack(spacing: 4) {
+                    Button(action: toggleSimulation) {
+                        Label(isSimulating ? "Stop Simulator Mode" : "Test Radar (Simulator Only)",
+                              systemImage: isSimulating ? "stop.circle.fill" : "play.circle.fill")
+                            .font(.caption.bold())
+                            .foregroundColor(.purple)
+                    }
+                    Text("Physical iPhones use real UWB hardware automatically")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.bottom, 8)
+                #endif
+            }
+            .padding()
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        #if targetEnvironment(simulator)
+                        stopSimulation()
+                        #endif
+                        dismiss()
+                    }
+                }
+            }
+            .onDisappear {
+                #if targetEnvironment(simulator)
+                stopSimulation()
+                #endif
+            }
+        }
+    }
+
+    // MARK: - Visualizer with Glowing Pointing Arrow
+
+    private var uwbTrackingVisualizer: some View {
+        ZStack {
+            // Radar concentric rings
+            Circle()
+                .stroke(Color.blue.opacity(0.15), lineWidth: 2)
+                .frame(width: 220, height: 220)
+
+            Circle()
+                .stroke(Color.blue.opacity(0.25), lineWidth: 2)
+                .frame(width: 150, height: 150)
+
+            Circle()
+                .stroke(Color.blue.opacity(0.35), lineWidth: 2)
+                .frame(width: 80, height: 80)
+
+            if let direction = interactionManager.direction {
+                // Calculate 2D pointing angle on the screen
+                let angle = Angle(radians: Double(atan2(direction.x, direction.y)))
+
+                Image(systemName: "location.north.fill")
+                    .font(.system(size: 72, weight: .bold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.cyan, .blue],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .rotationEffect(angle)
+                    .shadow(color: .cyan.opacity(0.8), radius: 18, x: 0, y: 0)
+                    .animation(.spring(response: 0.35, dampingFraction: 0.7), value: angle)
+            } else {
+                Image(systemName: "rays")
+                    .font(.system(size: 60))
+                    .foregroundColor(.blue.opacity(0.5))
+            }
+        }
+    }
+
+    // MARK: - Fallback Card for Non-UWB Devices
+
+    private var uwbFallbackCard: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title)
+                .foregroundColor(.orange)
+
+            Text("UWB Hardware Unavailable")
+                .font(.headline.bold())
+                .foregroundColor(.orange)
+
+            Text("This device lacks Apple Ultra Wideband hardware. Directional rescue falls back to local mesh status.")
+                .font(.caption)
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+                .padding(.horizontal)
+
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(meshManager.connectedPeers.isEmpty ? Color.red : Color.green)
+                    .frame(width: 8, height: 8)
+                Text(meshManager.connectedPeers.isEmpty ? "Mesh Signal: Offline" : "Mesh Signal: Connected (\(meshManager.connectedPeers.count) peer(s))")
+                    .font(.caption.bold())
+                    .foregroundColor(.primary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color(.secondarySystemBackground))
+            .cornerRadius(8)
+        }
+        .padding()
+        .background(Color.orange.opacity(0.1))
+        .cornerRadius(16)
+    }
+
+    // MARK: - Simulation Helper (Simulator only)
+
+    #if targetEnvironment(simulator)
+    private func toggleSimulation() {
+        if isSimulating {
+            stopSimulation()
+        } else {
+            startSimulation()
+        }
+    }
+
+    private func startSimulation() {
+        isSimulating = true
+        simDistance = 1.9
+        simAngle = 0.0
+
+        simulationTimer?.invalidate()
+        simulationTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+            simDistance = max(0.2, simDistance - 0.05)
+            simAngle += 0.08
+
+            let x = sin(simAngle)
+            let y = cos(simAngle)
+            let dir = simd_float3(x: x, y: y, z: 0.0)
+
+            interactionManager.simulateTarget(distance: simDistance, direction: dir)
+        }
+    }
+
+    private func stopSimulation() {
+        simulationTimer?.invalidate()
+        simulationTimer = nil
+        isSimulating = false
+    }
+    #endif
 }
 
 #Preview {
