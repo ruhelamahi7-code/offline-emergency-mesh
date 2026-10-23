@@ -2,24 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>EmergencyMesh uses local mesh networking to discover and communicate with nearby devices offline.</string>
-    <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>EmergencyMesh uses Bluetooth to discover and connect with nearby peers in an offline emergency mesh.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>EmergencyMesh uses the microphone on-device to classify emergency sounds such as fire alarms and screaming.</string>
-    <key>NSNearbyInteractionUsageDescription</key>
-    <string>EmergencyMesh uses Ultra Wideband to provide precise directional tracking and distance to distressed peers.</string>
-    <key>NSNearbyInteractionAllowOnceUsageDescription</key>
-    <string>EmergencyMesh uses Ultra Wideband to locate nearby peers in an emergency.</string>
-    <key>NSBonjourServices</key>
-    <array>
-        <string>_emerg-mesh._tcp</string>
-        <string>_emerg-mesh._udp</string>
-    </array>
-    <key>UIBackgroundModes</key>
-    <array>
-        <string>audio</string>
-    </array>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_emerg-mesh._tcp</string>
+		<string>_emerg-mesh._udp</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 </dict>
 </plist>
