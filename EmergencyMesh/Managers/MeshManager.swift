@@ -25,7 +25,7 @@ struct MeshPacket: Codable, Identifiable {
     var id: UUID = UUID()
     var senderID: String
     var timestamp: Date = Date()
-    var ttl: Int = 5 // Increased default to 5 hops
+    var ttl: Int = 5 // Default TTL: 5 hops
     var isEncrypted: Bool
     var payload: Data
     var packetType: MeshPacketType = .message
@@ -46,9 +46,9 @@ struct RoutedMessage: Identifiable, Equatable {
 // MARK: - Mesh Manager
 
 class MeshManager: NSObject, ObservableObject {
+    // Exactly matches _emerg-mesh._tcp and _emerg-mesh._udp from Info.plist
     private let serviceType = "emerg-mesh"
     private static let callsignKey = "user_callsign"
-    private static let peerIDArchiveKey = "user_peer_id_archive"
 
     static func getStoredCallsign() -> String {
         if let saved = UserDefaults.standard.string(forKey: callsignKey),
@@ -58,19 +58,6 @@ class MeshManager: NSObject, ObservableObject {
         let fallback = "Survivor-\(Int.random(in: 100...999))"
         UserDefaults.standard.set(fallback, forKey: callsignKey)
         return fallback
-    }
-
-    static func getOrCreatePeerID(callsign: String) -> MCPeerID {
-        if let data = UserDefaults.standard.data(forKey: peerIDArchiveKey),
-           let peerID = try? NSKeyedUnarchiver.unarchivedObject(ofClass: MCPeerID.self, from: data),
-           peerID.displayName == callsign {
-            return peerID
-        }
-        let newPeerID = MCPeerID(displayName: callsign)
-        if let archived = try? NSKeyedArchiver.archivedData(withRootObject: newPeerID, requiringSecureCoding: true) {
-            UserDefaults.standard.set(archived, forKey: peerIDArchiveKey)
-        }
-        return newPeerID
     }
 
     @Published var userCallsign: String
@@ -105,7 +92,7 @@ class MeshManager: NSObject, ObservableObject {
     override init() {
         let callsign = Self.getStoredCallsign()
         self.userCallsign = callsign
-        let peer = Self.getOrCreatePeerID(callsign: callsign)
+        let peer = MCPeerID(displayName: callsign)
         self.myPeerID = peer
 
         self.session = MCSession(peer: peer, securityIdentity: nil, encryptionPreference: .required)
@@ -136,14 +123,10 @@ class MeshManager: NSObject, ObservableObject {
         UserDefaults.standard.set(trimmed, forKey: Self.callsignKey)
         self.userCallsign = trimmed
 
-        let newPeer = MCPeerID(displayName: trimmed)
-        if let archived = try? NSKeyedArchiver.archivedData(withRootObject: newPeer, requiringSecureCoding: true) {
-            UserDefaults.standard.set(archived, forKey: Self.peerIDArchiveKey)
-        }
-
         stopHeartbeat()
         stopNetworking()
 
+        let newPeer = MCPeerID(displayName: trimmed)
         self.myPeerID = newPeer
         self.session = MCSession(peer: newPeer, securityIdentity: nil, encryptionPreference: .required)
         self.serviceAdvertiser = MCNearbyServiceAdvertiser(peer: newPeer, discoveryInfo: nil, serviceType: serviceType)
@@ -174,7 +157,7 @@ class MeshManager: NSObject, ObservableObject {
         session.disconnect()
     }
 
-    // MARK: - 3.5s Keep-Alive Heartbeat (AWDL Radio Keep-Alive)
+    // MARK: - 3.5s Untethered Radio Keep-Alive Heartbeat
 
     private func startHeartbeat() {
         heartbeatTimer?.invalidate()
@@ -388,8 +371,10 @@ extension MeshManager: MCSessionDelegate {
             switch state {
             case .connected:
                 print("Connected to peer: \(peerID.displayName)")
-                // Discovery throttle: stop browsing to clear 2.4GHz spectrum for data; keep advertiser active
-                self.serviceBrowser.stopBrowsingForPeers()
+                // Pause aggressive browsing once connected to reduce 2.4GHz radio collisions; keep advertising active
+                if session.connectedPeers.count >= 1 {
+                    self.serviceBrowser.stopBrowsingForPeers()
+                }
 
                 if let tokenData = self.localDiscoveryTokenProvider?(peerID) {
                     self.sendDiscoveryToken(tokenData, to: peerID)
@@ -408,11 +393,11 @@ extension MeshManager: MCSessionDelegate {
                 self.receivedPeerTokens.removeValue(forKey: peerID.displayName)
                 self.onPeerDisconnected?(peerID)
 
-                // If all peers are disconnected, resume browsing after 1.5s delay to heal link
+                // Trigger an auto-reconnect backoff (resume browsing after 1.5 seconds)
                 if session.connectedPeers.isEmpty {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                         guard let self = self, self.session.connectedPeers.isEmpty else { return }
-                        print("[MeshManager] Auto-reconnect triggered: resuming browser...")
+                        print("[MeshManager] Auto-reconnect triggered: resuming browsing...")
                         self.serviceBrowser.startBrowsingForPeers()
                     }
                 }
@@ -436,7 +421,7 @@ extension MeshManager: MCSessionDelegate {
             return
         }
 
-        // Heartbeat keep-alive: silently drop immediately without adding to UI feed
+        // Heartbeat keep-alive: silently drop without adding to UI feed
         if packet.packetType == .heartbeat {
             return
         }
