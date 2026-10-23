@@ -46,7 +46,10 @@ struct RoutedMessage: Identifiable, Equatable {
 
 class MeshManager: NSObject, ObservableObject {
     private let serviceType = "emerg-mesh"
-    public let myPeerID = MCPeerID(displayName: UIDevice.current.name)
+    
+    // Append a random 4-digit salt to guarantee distinct peer names across identical devices
+    public let myPeerID = MCPeerID(displayName: "\(UIDevice.current.name) [\(String(Int.random(in: 1000...9999)))]")
+    
     private let serviceAdvertiser: MCNearbyServiceAdvertiser
     private let serviceBrowser: MCNearbyServiceBrowser
     private let session: MCSession
@@ -247,9 +250,8 @@ extension MeshManager: MCNearbyServiceBrowserDelegate {
         foundPeer peerID: MCPeerID,
         withDiscoveryInfo info: [String: String]?
     ) {
-        // Tie-breaker to prevent simultaneous mutual invitations from colliding between devices
-        let shouldInvite = myPeerID.displayName > peerID.displayName ||
-            (myPeerID.displayName == peerID.displayName && myPeerID.hashValue > peerID.hashValue)
+        // Deterministic tie-breaker to prevent simultaneous mutual invitations from colliding between devices
+        let shouldInvite = myPeerID.displayName > peerID.displayName
 
         if shouldInvite {
             print("Inviting peer: \(peerID.displayName)")
@@ -277,6 +279,14 @@ extension MeshManager: MCSessionDelegate {
                 // Send our discovery token directly to the newly connected peer
                 if let tokenData = self.localDiscoveryTokenProvider?(peerID) {
                     self.sendDiscoveryToken(tokenData, to: peerID)
+                } else {
+                    // Retry after 0.5s if local UWB token wasn't ready at instant of connection
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                        guard let self = self else { return }
+                        if let retryToken = self.localDiscoveryTokenProvider?(peerID) {
+                            self.sendDiscoveryToken(retryToken, to: peerID)
+                        }
+                    }
                 }
                 self.onPeerConnected?(peerID)
 

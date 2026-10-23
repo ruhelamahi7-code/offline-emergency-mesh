@@ -39,7 +39,7 @@ class SoundListenerManager: NSObject, ObservableObject {
         if #available(iOS 17.0, *) {
             AVAudioApplication.requestRecordPermission { [weak self] granted in
                 guard granted else {
-                    print("Microphone access denied by user.")
+                    print("[SoundListenerManager] Microphone access denied by user.")
                     return
                 }
                 DispatchQueue.main.async {
@@ -49,7 +49,7 @@ class SoundListenerManager: NSObject, ObservableObject {
         } else {
             AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
                 guard granted else {
-                    print("Microphone access denied by user.")
+                    print("[SoundListenerManager] Microphone access denied by user.")
                     return
                 }
                 DispatchQueue.main.async {
@@ -70,7 +70,7 @@ class SoundListenerManager: NSObject, ObservableObject {
             let busFormat = inputNode.outputFormat(forBus: 0)
 
             guard busFormat.sampleRate > 0 else {
-                print("Invalid audio format with zero sample rate.")
+                print("[SoundListenerManager] Invalid audio format with zero sample rate.")
                 return
             }
 
@@ -79,7 +79,8 @@ class SoundListenerManager: NSObject, ObservableObject {
             let classifyRequest = try SNClassifySoundRequest(classifierIdentifier: .version1)
             try analyzer.add(classifyRequest, withObserver: self)
 
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: busFormat) { [weak self] buffer, when in
+            // Pass nil to automatically adopt the node's native hardware bus format
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, when in
                 guard let self = self else { return }
 
                 // In-memory decibel level metering (no disk write)
@@ -113,7 +114,8 @@ class SoundListenerManager: NSObject, ObservableObject {
                 self.isListening = true
             }
         } catch {
-            print("Failed to start sound analysis engine: \(error.localizedDescription)")
+            print("[SoundListenerManager] Failed to start sound analysis engine: \(error.localizedDescription)")
+            audioEngine?.inputNode.removeTap(onBus: 0)
             stopListening()
         }
     }
@@ -121,7 +123,9 @@ class SoundListenerManager: NSObject, ObservableObject {
     func stopListening() {
         if let engine = audioEngine {
             engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+            if engine.isRunning {
+                engine.stop()
+            }
         }
         streamAnalyzer?.removeAllRequests()
         streamAnalyzer = nil
@@ -171,10 +175,10 @@ extension SoundListenerManager: SNResultsObserving {
     }
 
     func request(_ request: SNRequest, didFailWithError error: Error) {
-        print("Sound classifier request failed: \(error.localizedDescription)")
+        print("[SoundListenerManager] Sound classifier request failed: \(error.localizedDescription)")
     }
 
     func requestDidComplete(_ request: SNRequest) {
-        print("Sound classifier request completed.")
+        print("[SoundListenerManager] Sound classifier request completed.")
     }
 }

@@ -20,6 +20,9 @@ class InteractionManager: NSObject, ObservableObject {
     @Published var activePeerName: String? = nil
     @Published var availableTrackedPeers: [String] = []
 
+    // Persistent shared session for warming up local discovery token
+    private let localSharedSession = NISession()
+
     // Multi-peer storage: Separate NISession per connected peer
     private var peerSessions: [String: NISession] = [:]
     private var peerTokens: [String: NIDiscoveryToken] = [:]
@@ -43,11 +46,15 @@ class InteractionManager: NSObject, ObservableObject {
     override init() {
         super.init()
         isUWBSupported = InteractionManager.checkUWBSupport()
+        if isUWBSupported {
+            localSharedSession.delegate = self
+        }
         hapticGenerator.prepare()
     }
 
     deinit {
         stopHapticPulse()
+        localSharedSession.invalidate()
         for session in peerSessions.values {
             session.invalidate()
         }
@@ -60,8 +67,11 @@ class InteractionManager: NSObject, ObservableObject {
     func token(for peerID: MCPeerID) -> Data? {
         guard isUWBSupported else { return nil }
 
-        let session = getOrCreateSession(for: peerID.displayName)
-        guard let token = session.discoveryToken else { return nil }
+        // Read the discoveryToken from the persistent warmed-up shared session
+        guard let token = localSharedSession.discoveryToken else {
+            print("[InteractionManager] Warning: localSharedSession.discoveryToken is nil during token exchange for \(peerID.displayName)")
+            return nil
+        }
 
         return try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
     }
@@ -79,13 +89,13 @@ class InteractionManager: NSObject, ObservableObject {
     /// Handles a received discovery token from a peer and initiates real-time ranging
     func receiveToken(peerID: MCPeerID, tokenData: Data) {
         guard isUWBSupported else {
-            print("UWB not supported on this device.")
+            print("[InteractionManager] UWB not supported on this device.")
             return
         }
 
         do {
             guard let token = try NSKeyedUnarchiver.unarchivedObject(ofClass: NIDiscoveryToken.self, from: tokenData) else {
-                print("Failed to unarchive NIDiscoveryToken from \(peerID.displayName)")
+                print("[InteractionManager] Failed to unarchive NIDiscoveryToken from \(peerID.displayName)")
                 return
             }
 
@@ -107,9 +117,9 @@ class InteractionManager: NSObject, ObservableObject {
                 self.isTracking = true
             }
 
-            print("Started active UWB session with \(peerID.displayName)")
+            print("[InteractionManager] Started active UWB session with \(peerID.displayName)")
         } catch {
-            print("Error initializing NearbyInteraction for \(peerID.displayName): \(error.localizedDescription)")
+            print("[InteractionManager] Error initializing NearbyInteraction for \(peerID.displayName): \(error.localizedDescription)")
         }
     }
 
