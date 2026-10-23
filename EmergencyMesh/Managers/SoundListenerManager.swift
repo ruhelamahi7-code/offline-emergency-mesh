@@ -23,6 +23,10 @@ class SoundListenerManager: NSObject, ObservableObject {
     private var streamAnalyzer: SNAudioStreamAnalyzer?
     private let analysisQueue = DispatchQueue(label: "com.emergencymesh.soundanalysis", qos: .userInitiated)
 
+    // Concurrency & Throttle Locks
+    private var isAnalyzingBuffer = false
+    private var lastDbUpdateTime = Date.distantPast
+
     private var interruptionObserver: NSObjectProtocol?
     private var routeChangeObserver: NSObjectProtocol?
 
@@ -141,7 +145,8 @@ class SoundListenerManager: NSObject, ObservableObject {
 
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
+            // Use .mixWithOthers so listening does NOT mute proximity sonar beeps or system audio
+            try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth])
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
 
             let engine = AVAudioEngine()
@@ -162,25 +167,34 @@ class SoundListenerManager: NSObject, ObservableObject {
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, when in
                 guard let self = self else { return }
 
-                // In-memory decibel level metering (no disk write)
-                if let channelData = buffer.floatChannelData?[0] {
-                    let frameCount = Int(buffer.frameLength)
-                    if frameCount > 0 {
-                        var sum: Float = 0.0
-                        for i in 0..<frameCount {
-                            let sample = channelData[i]
-                            sum += sample * sample
-                        }
-                        let rms = sqrt(sum / Float(frameCount))
-                        let db = 20.0 * log10(max(rms, 0.00001))
-                        DispatchQueue.main.async {
-                            self.currentDecibels = max(db, -160.0)
+                // Throttled in-memory decibel level metering (at most 4 updates/sec to prevent MainActor lockup)
+                let now = Date()
+                if now.timeIntervalSince(self.lastDbUpdateTime) >= 0.25 {
+                    self.lastDbUpdateTime = now
+                    if let channelData = buffer.floatChannelData?[0] {
+                        let frameCount = Int(buffer.frameLength)
+                        if frameCount > 0 {
+                            var sum: Float = 0.0
+                            for i in 0..<frameCount {
+                                let sample = channelData[i]
+                                sum += sample * sample
+                            }
+                            let rms = sqrt(sum / Float(frameCount))
+                            let db = 20.0 * log10(max(rms, 0.00001))
+                            DispatchQueue.main.async {
+                                self.currentDecibels = max(db, -160.0)
+                            }
                         }
                     }
                 }
 
-                // Stream audio buffer directly to on-device SoundAnalysis classifier in RAM
-                self.analysisQueue.async {
+                // Drop audio buffer if analyzer queue is still processing previous chunk (preventing RAM backpressure)
+                self.analysisQueue.async { [weak self] in
+                    guard let self = self else { return }
+                    guard !self.isAnalyzingBuffer else { return }
+                    self.isAnalyzingBuffer = true
+                    defer { self.isAnalyzingBuffer = false }
+
                     self.streamAnalyzer?.analyze(buffer, atAudioFramePosition: when.sampleTime)
                 }
             }

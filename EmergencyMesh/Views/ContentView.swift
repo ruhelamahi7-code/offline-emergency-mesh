@@ -55,13 +55,7 @@ struct ContentView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: {
-                        showFinderSheet = true
-                    }) {
-                        Image(systemName: "location.viewfinder")
-                            .font(.headline)
-                            .foregroundColor(.blue)
-                    }
+                    topRightMiniFinderWidget
                 }
             }
             .sheet(isPresented: $showFinderSheet) {
@@ -80,8 +74,46 @@ struct ContentView: View {
                 Text("Set a distinct identifier so nearby rescue devices recognize you across the offline mesh.")
             }
             .onAppear {
+                UIApplication.shared.isIdleTimerDisabled = true
                 setupEventCallbacks()
                 soundManager.startListening()
+            }
+        }
+    }
+
+    // MARK: - Top-Right Mini Radar / Direction Pill Widget
+
+    private var topRightMiniFinderWidget: some View {
+        Button(action: {
+            showFinderSheet = true
+        }) {
+            if let dist = interactionManager.distance, let dir = interactionManager.direction {
+                let angle = Angle(radians: Double(atan2(dir.x, dir.y)))
+                HStack(spacing: 5) {
+                    Image(systemName: "location.north.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.white)
+                        .rotationEffect(angle)
+
+                    Text(String(format: "%.1fm", dist))
+                        .font(.caption.monospacedDigit().bold())
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule()
+                        .fill(dist < 1.0 ? Color.green : Color.blue)
+                        .shadow(color: (dist < 1.0 ? Color.green : Color.blue).opacity(0.5), radius: 4)
+                )
+            } else {
+                HStack(spacing: 4) {
+                    Image(systemName: "location.viewfinder")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("Finder")
+                        .font(.caption.bold())
+                }
+                .foregroundColor(.blue)
             }
         }
     }
@@ -220,7 +252,7 @@ struct ContentView: View {
             }) {
                 HStack {
                     Image(systemName: "location.viewfinder")
-                    Text("Open UWB Precision Finder")
+                    Text("Open Precision Finder")
                         .font(.caption.bold())
                 }
                 .frame(maxWidth: .infinity)
@@ -422,7 +454,7 @@ struct ContentView: View {
                 }) {
                     HStack(spacing: 4) {
                         Image(systemName: "location.viewfinder")
-                        Text("Locate \(msg.senderID) via UWB")
+                        Text("Locate \(msg.senderID)")
                     }
                     .font(.caption.bold())
                     .foregroundColor(.red)
@@ -509,159 +541,127 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Layer 3: Directional Finder Sheet (NearbyInteraction / UWB)
+// MARK: - Layer 3: Directional Finder Sheet (UWB Precision + Proximity Simulator)
 
 struct DirectionalFinderSheet: View {
     @ObservedObject var interactionManager: InteractionManager
     @ObservedObject var meshManager: MeshManager
     @Environment(\.dismiss) private var dismiss
 
-    #if targetEnvironment(simulator)
-    @State private var isSimulating = false
-    @State private var simulationTimer: Timer?
-    @State private var simDistance: Float = 1.9
-    @State private var simAngle: Float = 0.0
-    #endif
-
     var body: some View {
         NavigationStack {
-            VStack(spacing: 20) {
-                // Header Details
-                VStack(spacing: 4) {
-                    Text("Layer 3 Precision Rescue")
-                        .font(.caption.bold())
-                        .foregroundColor(.blue)
-                    Text("Ultra Wideband Directional Finder")
-                        .font(.title3.bold())
-                }
-                .padding(.top, 8)
-
-                // Multi-Peer Selector Bar
-                if !interactionManager.availableTrackedPeers.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Select Peer to Track:")
-                            .font(.caption2.bold())
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal)
-
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                ForEach(interactionManager.availableTrackedPeers, id: \.self) { peerName in
-                                    let isSelected = (interactionManager.activePeerName == peerName)
-                                    Button(action: {
-                                        interactionManager.selectActivePeer(peerName)
-                                    }) {
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "location.north.circle.fill")
-                                            Text(peerName)
-                                                .font(.caption.bold())
-                                        }
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .background(isSelected ? Color.blue : Color(.secondarySystemBackground))
-                                        .foregroundColor(isSelected ? .white : .primary)
-                                        .cornerRadius(8)
-                                    }
-                                }
-                            }
-                            .padding(.horizontal)
-                        }
-                    }
-                }
-
-                Spacer()
-
-                // UWB Hardware Support or Fallback Indicator
-                if !interactionManager.isUWBSupported {
-                    uwbFallbackCard
-                } else {
-                    uwbTrackingVisualizer
-                }
-
-                Spacer()
-
-                // Centimeter Distance Readout
-                VStack(spacing: 4) {
-                    if let peer = interactionManager.activePeerName {
-                        Text("Target: \(peer)")
+            ScrollView {
+                VStack(spacing: 16) {
+                    // Header Details
+                    VStack(spacing: 4) {
+                        Text("Layer 3 Precision Rescue")
                             .font(.caption.bold())
                             .foregroundColor(.blue)
+                        Text("Ultra Wideband Directional Finder")
+                            .font(.title3.bold())
+                    }
+                    .padding(.top, 4)
+
+                    // Multi-Peer Selector Bar
+                    if !interactionManager.availableTrackedPeers.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Select Peer to Track:")
+                                .font(.caption2.bold())
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(interactionManager.availableTrackedPeers, id: \.self) { peerName in
+                                        let isSelected = (interactionManager.activePeerName == peerName)
+                                        Button(action: {
+                                            interactionManager.selectActivePeer(peerName)
+                                        }) {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "location.north.circle.fill")
+                                                Text(peerName)
+                                                    .font(.caption.bold())
+                                            }
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(isSelected ? Color.blue : Color(.secondarySystemBackground))
+                                            .foregroundColor(isSelected ? .white : .primary)
+                                            .cornerRadius(8)
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal)
+                            }
+                        }
                     }
 
-                    if let distance = interactionManager.distance {
-                        Text(String(format: "%.1f m away", distance))
-                            .font(.system(size: 38, weight: .heavy, design: .rounded))
-                            .foregroundColor(.primary)
-
-                        Text(String(format: "(%d cm)", Int(distance * 100)))
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    } else if !interactionManager.isUWBSupported {
-                        Text("Mesh Signal Connected")
-                            .font(.title3.bold())
-                            .foregroundColor(.orange)
-                        Text("Centimeter UWB unavailable on this model")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                    // Main Compass / Visualizer
+                    if !interactionManager.isUWBSupported && !interactionManager.isDemoMode {
+                        uwbFallbackCard
                     } else {
-                        Text("Acquiring Real-Time UWB Signal...")
-                            .font(.title3.bold())
-                            .foregroundColor(.secondary)
-                        Text("Point your iPhone toward the peer to establish lock")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        uwbTrackingVisualizer
                     }
-                }
 
-                // Simulator Mode helper (strictly compiled out on physical iPhones)
-                #if targetEnvironment(simulator)
-                VStack(spacing: 4) {
-                    Button(action: toggleSimulation) {
-                        Label(isSimulating ? "Stop Simulator Mode" : "Test Radar (Simulator Only)",
-                              systemImage: isSimulating ? "stop.circle.fill" : "play.circle.fill")
-                            .font(.caption.bold())
-                            .foregroundColor(.purple)
+                    // Centimeter Distance Readout
+                    VStack(spacing: 2) {
+                        if let peer = interactionManager.activePeerName {
+                            Text("Target: \(peer)")
+                                .font(.caption.bold())
+                                .foregroundColor(.blue)
+                        }
+
+                        if let distance = interactionManager.distance {
+                            Text(String(format: "%.1f m away", distance))
+                                .font(.system(size: 38, weight: .heavy, design: .rounded))
+                                .foregroundColor(distance < 1.0 ? .green : .primary)
+
+                            Text(String(format: "(%d cm)", Int(distance * 100)))
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("Acquiring Real-Time UWB Signal...")
+                                .font(.subheadline.bold())
+                                .foregroundColor(.secondary)
+                            Text("Point your iPhone toward the peer to establish lock")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
-                    Text("Physical iPhones use real UWB hardware automatically")
-                        .font(.system(size: 9))
-                        .foregroundColor(.secondary)
+
+                    // Live Demo Proximity Simulator Card (For presentations / non-UWB testing)
+                    demoSimulatorCard
                 }
-                .padding(.bottom, 8)
-                #endif
+                .padding()
             }
-            .padding()
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") {
-                        #if targetEnvironment(simulator)
-                        stopSimulation()
-                        #endif
                         dismiss()
                     }
                 }
             }
-            .onDisappear {
-                #if targetEnvironment(simulator)
-                stopSimulation()
-                #endif
-            }
         }
     }
 
-    // MARK: - Visualizer with Glowing Pointing Arrow
+    // MARK: - Visualizer with Rotating Arrow and Pulsing Rings
 
     private var uwbTrackingVisualizer: some View {
         ZStack {
+            // Background pulsing rings synchronized with audio/haptic pulse
             Circle()
                 .stroke(Color.blue.opacity(0.15), lineWidth: 2)
                 .frame(width: 220, height: 220)
+                .scaleEffect(interactionManager.pulseVisualTick ? 1.05 : 0.98)
+                .animation(.easeOut(duration: 0.15), value: interactionManager.pulseVisualTick)
 
             Circle()
                 .stroke(Color.blue.opacity(0.25), lineWidth: 2)
                 .frame(width: 150, height: 150)
+                .scaleEffect(interactionManager.pulseVisualTick ? 1.08 : 0.96)
+                .animation(.easeOut(duration: 0.15), value: interactionManager.pulseVisualTick)
 
             Circle()
-                .stroke(Color.blue.opacity(0.35), lineWidth: 2)
+                .stroke(Color.cyan.opacity(0.4), lineWidth: 3)
                 .frame(width: 80, height: 80)
 
             if let direction = interactionManager.direction {
@@ -678,13 +678,14 @@ struct DirectionalFinderSheet: View {
                     )
                     .rotationEffect(angle)
                     .shadow(color: .cyan.opacity(0.8), radius: 18, x: 0, y: 0)
-                    .animation(.spring(response: 0.35, dampingFraction: 0.7), value: angle)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: angle)
             } else {
                 Image(systemName: "rays")
                     .font(.system(size: 60))
                     .foregroundColor(.blue.opacity(0.5))
             }
         }
+        .frame(height: 230)
     }
 
     // MARK: - Fallback Card for Non-UWB Devices
@@ -695,11 +696,11 @@ struct DirectionalFinderSheet: View {
                 .font(.title)
                 .foregroundColor(.orange)
 
-            Text("UWB Hardware Unavailable")
+            Text("UWB Hardware Acquiring")
                 .font(.headline.bold())
                 .foregroundColor(.orange)
 
-            Text("This device lacks Apple Ultra Wideband hardware. Directional rescue falls back to local mesh status.")
+            Text("Direct Line-of-Sight or UWB hardware not locked yet. Use the Demo Proximity Simulator below to test audio beeps and haptic vibrations.")
                 .font(.caption)
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)
@@ -723,39 +724,82 @@ struct DirectionalFinderSheet: View {
         .cornerRadius(16)
     }
 
-    // MARK: - Simulation Helper (Simulator only)
+    // MARK: - Demo Proximity Simulator Card (Real Devices & Presentation)
 
-    #if targetEnvironment(simulator)
-    private func toggleSimulation() {
-        if isSimulating {
-            stopSimulation()
-        } else {
-            startSimulation()
+    private var demoSimulatorCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Live Proximity Simulator", systemImage: "slider.horizontal.3")
+                    .font(.subheadline.bold())
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { interactionManager.isDemoMode },
+                    set: { interactionManager.toggleDemoMode($0) }
+                ))
+                .labelsHidden()
+            }
+
+            Text("Enable to demonstrate accelerating sonar beeps, heavy haptics, and rotating arrow live to judges.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            if interactionManager.isDemoMode {
+                VStack(spacing: 8) {
+                    HStack {
+                        Text("Distance: \(String(format: "%.2f m", interactionManager.demoDistance))")
+                            .font(.caption.monospaced().bold())
+                        Spacer()
+                        Text(interactionManager.demoDistance < 0.5 ? "⚡ Intense Beep" : "Normal")
+                            .font(.caption2.bold())
+                            .foregroundColor(interactionManager.demoDistance < 0.5 ? .red : .blue)
+                    }
+
+                    Slider(
+                        value: Binding(
+                            get: { Double(interactionManager.demoDistance) },
+                            set: { interactionManager.updateDemoDistance(Float($0)) }
+                        ),
+                        in: 0.2...5.0,
+                        step: 0.1
+                    )
+                    .tint(.blue)
+
+                    HStack {
+                        Text("Angle: \(Int(interactionManager.demoAngleDegrees))°")
+                            .font(.caption.monospaced().bold())
+                        Spacer()
+                    }
+
+                    Slider(
+                        value: Binding(
+                            get: { interactionManager.demoAngleDegrees },
+                            set: { interactionManager.updateDemoAngle($0) }
+                        ),
+                        in: 0...360,
+                        step: 5
+                    )
+                    .tint(.cyan)
+
+                    Button(action: {
+                        interactionManager.startSimulatedApproach()
+                    }) {
+                        HStack {
+                            Image(systemName: "play.circle.fill")
+                            Text("Simulate Approach (3.5m → 0.2m)")
+                                .font(.caption.bold())
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
+                    }
+                }
+                .padding(.top, 4)
+            }
         }
+        .padding(12)
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
     }
-
-    private func startSimulation() {
-        isSimulating = true
-        simDistance = 1.9
-        simAngle = 0.0
-
-        simulationTimer?.invalidate()
-        simulationTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
-            simDistance = max(0.2, simDistance - 0.05)
-            simAngle += 0.08
-
-            let x = sin(simAngle)
-            let y = cos(simAngle)
-            let dir = simd_float3(x: x, y: y, z: 0.0)
-
-            interactionManager.simulateTarget(distance: simDistance, direction: dir)
-        }
-    }
-
-    private func stopSimulation() {
-        simulationTimer?.invalidate()
-        simulationTimer = nil
-        isSimulating = false
-    }
-    #endif
 }

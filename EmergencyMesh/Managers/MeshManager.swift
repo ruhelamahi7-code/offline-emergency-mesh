@@ -46,7 +46,7 @@ struct RoutedMessage: Identifiable, Equatable {
 // MARK: - Mesh Manager
 
 class MeshManager: NSObject, ObservableObject {
-    // Exactly matches _emerg-mesh._tcp and _emerg-mesh._udp from Info.plist
+    // Matches _emerg-mesh._tcp and _emerg-mesh._udp from Info.plist
     private let serviceType = "emerg-mesh"
     private static let callsignKey = "user_callsign"
 
@@ -67,6 +67,7 @@ class MeshManager: NSObject, ObservableObject {
     private var serviceBrowser: MCNearbyServiceBrowser
     private var session: MCSession
 
+    private var connectingPeers: Set<String> = []
     private var seenPacketIDs: Set<UUID> = []
     private let cacheLock = NSLock()
     private var heartbeatTimer: Timer?
@@ -95,7 +96,9 @@ class MeshManager: NSObject, ObservableObject {
         let peer = MCPeerID(displayName: callsign)
         self.myPeerID = peer
 
-        self.session = MCSession(peer: peer, securityIdentity: nil, encryptionPreference: .required)
+        // Use encryptionPreference: .none to avoid Apple's buggy TLS handshake timeouts over ad-hoc Wi-Fi
+        // (All application data is already secured via AES-256 GCM using CryptoKit)
+        self.session = MCSession(peer: peer, securityIdentity: nil, encryptionPreference: .none)
         self.serviceAdvertiser = MCNearbyServiceAdvertiser(peer: peer, discoveryInfo: nil, serviceType: serviceType)
         self.serviceBrowser = MCNearbyServiceBrowser(peer: peer, serviceType: serviceType)
 
@@ -128,7 +131,7 @@ class MeshManager: NSObject, ObservableObject {
 
         let newPeer = MCPeerID(displayName: trimmed)
         self.myPeerID = newPeer
-        self.session = MCSession(peer: newPeer, securityIdentity: nil, encryptionPreference: .required)
+        self.session = MCSession(peer: newPeer, securityIdentity: nil, encryptionPreference: .none)
         self.serviceAdvertiser = MCNearbyServiceAdvertiser(peer: newPeer, discoveryInfo: nil, serviceType: serviceType)
         self.serviceBrowser = MCNearbyServiceBrowser(peer: newPeer, serviceType: serviceType)
 
@@ -155,6 +158,7 @@ class MeshManager: NSObject, ObservableObject {
         serviceAdvertiser.stopAdvertisingPeer()
         serviceBrowser.stopBrowsingForPeers()
         session.disconnect()
+        connectingPeers.removeAll()
     }
 
     // MARK: - 3.5s Wireless Heartbeat (Keep-Alive)
@@ -265,7 +269,7 @@ class MeshManager: NSObject, ObservableObject {
         broadcastPacket(packet)
     }
 
-    // MARK: - Discovery Token Exchange
+    // MARK: - Discovery Token Exchange with Retry Loop
 
     func sendDiscoveryToken(_ tokenData: Data, to peer: MCPeerID) {
         let packet = MeshPacket(
@@ -282,27 +286,6 @@ class MeshManager: NSObject, ObservableObject {
         if let data = try? JSONEncoder().encode(packet) {
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 try? self?.session.send(data, toPeers: [peer], with: .reliable)
-            }
-        }
-    }
-
-    func broadcastDiscoveryToken(_ tokenData: Data) {
-        guard !session.connectedPeers.isEmpty else { return }
-        let packet = MeshPacket(
-            id: UUID(),
-            senderID: myPeerID.displayName,
-            timestamp: Date(),
-            ttl: 1,
-            isEncrypted: false,
-            payload: tokenData,
-            packetType: .discoveryToken
-        )
-
-        _ = registerPacketIfUnseen(id: packet.id)
-        if let data = try? JSONEncoder().encode(packet) {
-            let targetPeers = session.connectedPeers
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                try? self?.session.send(data, toPeers: targetPeers, with: .reliable)
             }
         }
     }
@@ -331,6 +314,13 @@ extension MeshManager: MCNearbyServiceAdvertiserDelegate {
         withContext context: Data?,
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
+        // Prevent duplicate invitation resets if already connected to this peer
+        if session.connectedPeers.contains(peerID) {
+            print("[MeshManager] Already connected to \(peerID.displayName), ignoring duplicate invitation.")
+            invitationHandler(false, nil)
+            return
+        }
+
         invitationHandler(true, session)
     }
 }
@@ -340,6 +330,7 @@ extension MeshManager: MCNearbyServiceAdvertiserDelegate {
 extension MeshManager: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
         print("[MeshManager] Lost peer: \(peerID.displayName)")
+        connectingPeers.remove(peerID.displayName)
     }
 
     func browser(
@@ -347,7 +338,13 @@ extension MeshManager: MCNearbyServiceBrowserDelegate {
         foundPeer peerID: MCPeerID,
         withDiscoveryInfo info: [String: String]?
     ) {
+        // Prevent duplicate simultaneous invitations if already connected or in-flight
+        if session.connectedPeers.contains(peerID) || connectingPeers.contains(peerID.displayName) {
+            return
+        }
+
         print("[MeshManager] Found peer: \(peerID.displayName), issuing invitation...")
+        connectingPeers.insert(peerID.displayName)
         browser.invitePeer(peerID, to: session, withContext: nil, timeout: 15)
     }
 }
@@ -368,24 +365,33 @@ extension MeshManager: MCSessionDelegate {
             switch state {
             case .connected:
                 print("Connected to peer: \(peerID.displayName)")
-                if session.connectedPeers.count >= 1 {
-                    self.serviceBrowser.stopBrowsingForPeers()
-                }
+                self.connectingPeers.remove(peerID.displayName)
 
+                // Initial UWB token exchange
                 if let tokenData = self.localDiscoveryTokenProvider?(peerID) {
                     self.sendDiscoveryToken(tokenData, to: peerID)
-                } else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                        guard let self = self else { return }
-                        if let retryToken = self.localDiscoveryTokenProvider?(peerID) {
-                            self.sendDiscoveryToken(retryToken, to: peerID)
-                        }
+                }
+
+                // Guaranteed retry loop: re-send token after 1.5s and 3.5s to ensure pairing lock
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    guard let self = self, self.session.connectedPeers.contains(peerID) else { return }
+                    if let token = self.localDiscoveryTokenProvider?(peerID) {
+                        self.sendDiscoveryToken(token, to: peerID)
                     }
                 }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                    guard let self = self, self.session.connectedPeers.contains(peerID) else { return }
+                    if let token = self.localDiscoveryTokenProvider?(peerID) {
+                        self.sendDiscoveryToken(token, to: peerID)
+                    }
+                }
+
                 self.onPeerConnected?(peerID)
 
             case .notConnected:
                 print("Disconnected from peer: \(peerID.displayName)")
+                self.connectingPeers.remove(peerID.displayName)
                 self.receivedPeerTokens.removeValue(forKey: peerID.displayName)
                 self.onPeerDisconnected?(peerID)
 

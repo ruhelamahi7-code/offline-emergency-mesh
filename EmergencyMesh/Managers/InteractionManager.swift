@@ -11,6 +11,7 @@ import MultipeerConnectivity
 import UIKit
 import simd
 import Combine
+import AudioToolbox
 
 class InteractionManager: NSObject, ObservableObject {
     @Published var distance: Float? = nil
@@ -20,16 +21,23 @@ class InteractionManager: NSObject, ObservableObject {
     @Published var activePeerName: String? = nil
     @Published var availableTrackedPeers: [String] = []
 
+    // Proximity Pulse & Feedback
+    @Published var pulseVisualTick: Bool = false
+    @Published var isDemoMode: Bool = false
+    @Published var demoDistance: Float = 2.4
+    @Published var demoAngleDegrees: Double = 45.0
+
     // Multi-peer storage: Separate active NISession and configuration per connected peer
     private var peerSessions: [String: NISession] = [:]
     private var peerTokens: [String: NIDiscoveryToken] = [:]
     private var peerConfigurations: [String: NINearbyPeerConfiguration] = [:]
     public var peerMeasurements: [String: (distance: Float?, direction: simd_float3?)] = [:]
 
-    // Haptics
-    private var hapticTimer: Timer?
-    private var currentHapticInterval: TimeInterval = 0
-    private let hapticGenerator = UIImpactFeedbackGenerator(style: .rigid)
+    // Haptics & Audible Sonar Beep
+    private var sonarTimer: Timer?
+    private var currentSonarInterval: TimeInterval = 0
+    private let hapticGenerator = UIImpactFeedbackGenerator(style: .heavy)
+    private var demoApproachTimer: Timer?
 
     // MARK: - Hardware Support Check
 
@@ -48,7 +56,8 @@ class InteractionManager: NSObject, ObservableObject {
     }
 
     deinit {
-        stopHapticPulse()
+        stopSonarPulse()
+        stopDemoApproach()
         for session in peerSessions.values {
             session.invalidate()
         }
@@ -56,8 +65,9 @@ class InteractionManager: NSObject, ObservableObject {
         peerConfigurations.removeAll()
     }
 
-    // MARK: - Token Management for Multi-Peer Mesh
+    // MARK: - Dedicated Per-Peer NISession & Token Exchange
 
+    /// CRITICAL FIX: The discovery token sent to a peer MUST come from the exact same NISession instance that runs for that peer
     func token(for peerID: MCPeerID) -> Data? {
         guard isUWBSupported else { return nil }
 
@@ -80,6 +90,7 @@ class InteractionManager: NSObject, ObservableObject {
         return newSession
     }
 
+    /// Handles received discovery token and executes session.run with matching NISession
     func receiveToken(peerID: MCPeerID, tokenData: Data) {
         guard isUWBSupported else {
             print("[InteractionManager] UWB not supported on this device.")
@@ -94,6 +105,7 @@ class InteractionManager: NSObject, ObservableObject {
 
             peerTokens[peerID.displayName] = token
 
+            // Fetch the exact matching session instance
             let session = getOrCreateSession(for: peerID.displayName)
             session.delegate = self
             let config = NINearbyPeerConfiguration(peerToken: token)
@@ -112,7 +124,7 @@ class InteractionManager: NSObject, ObservableObject {
                 self.isTracking = true
             }
 
-            print("[InteractionManager] Started active UWB session with \(peerID.displayName)")
+            print("[InteractionManager] Active UWB session paired & running for \(peerID.displayName)")
         } catch {
             print("[InteractionManager] Error initializing NearbyInteraction for \(peerID.displayName): \(error.localizedDescription)")
         }
@@ -123,10 +135,13 @@ class InteractionManager: NSObject, ObservableObject {
         if let measurement = peerMeasurements[peerName] {
             distance = measurement.distance
             direction = measurement.direction
-            updateHaptics(for: measurement.distance)
+            updateSonar(for: measurement.distance)
         } else {
             distance = nil
             direction = nil
+            if !isDemoMode {
+                stopSonarPulse()
+            }
         }
     }
 
@@ -145,66 +160,142 @@ class InteractionManager: NSObject, ObservableObject {
                 if let next = self.activePeerName, let m = self.peerMeasurements[next] {
                     self.distance = m.distance
                     self.direction = m.direction
+                    self.updateSonar(for: m.distance)
                 } else {
-                    self.distance = nil
-                    self.direction = nil
-                    self.stopHapticPulse()
+                    if !self.isDemoMode {
+                        self.distance = nil
+                        self.direction = nil
+                        self.stopSonarPulse()
+                    }
                 }
             }
         }
     }
 
     func stopTracking() {
-        stopHapticPulse()
+        stopSonarPulse()
+        stopDemoApproach()
         DispatchQueue.main.async {
             self.isTracking = false
         }
     }
 
-    // MARK: - Simulation Helper (strictly for Simulator preview)
+    // MARK: - Live Demo Simulator Mode (Available on Real Devices for Presentations)
 
-    #if targetEnvironment(simulator)
-    func simulateTarget(distance: Float, direction: simd_float3) {
-        DispatchQueue.main.async {
-            self.distance = distance
-            self.direction = direction
-            self.isTracking = true
-            self.updateHaptics(for: distance)
+    func toggleDemoMode(_ enabled: Bool) {
+        isDemoMode = enabled
+        if enabled {
+            applyDemoValues()
+        } else {
+            stopDemoApproach()
+            if let active = activePeerName, let m = peerMeasurements[active] {
+                distance = m.distance
+                direction = m.direction
+                updateSonar(for: m.distance)
+            } else {
+                distance = nil
+                direction = nil
+                stopSonarPulse()
+            }
         }
     }
-    #endif
 
-    // MARK: - Haptic Feedback
+    func updateDemoDistance(_ newDistance: Float) {
+        demoDistance = newDistance
+        if isDemoMode {
+            applyDemoValues()
+        }
+    }
 
-    private func updateHaptics(for distance: Float?) {
-        guard let dist = distance, dist < 2.0, dist > 0 else {
-            stopHapticPulse()
+    func updateDemoAngle(_ degrees: Double) {
+        demoAngleDegrees = degrees
+        if isDemoMode {
+            applyDemoValues()
+        }
+    }
+
+    private func applyDemoValues() {
+        let radians = demoAngleDegrees * .pi / 180.0
+        let dir = simd_float3(x: Float(sin(radians)), y: Float(cos(radians)), z: 0.0)
+
+        DispatchQueue.main.async {
+            self.distance = self.demoDistance
+            self.direction = dir
+            self.isTracking = true
+            self.updateSonar(for: self.demoDistance)
+        }
+    }
+
+    func startSimulatedApproach() {
+        stopDemoApproach()
+        isDemoMode = true
+        demoDistance = 3.5
+        demoAngleDegrees = 30.0
+        applyDemoValues()
+
+        demoApproachTimer = Timer.scheduledTimer(withTimeInterval: 0.20, repeats: true) { [weak self] timer in
+            guard let self = self else { return }
+            if self.demoDistance > 0.25 {
+                self.demoDistance = max(0.20, self.demoDistance - 0.08)
+                self.demoAngleDegrees = (self.demoAngleDegrees + 3.0).truncatingRemainder(dividingBy: 360.0)
+                self.applyDemoValues()
+            } else {
+                timer.invalidate()
+                self.demoApproachTimer = nil
+            }
+        }
+    }
+
+    func stopDemoApproach() {
+        demoApproachTimer?.invalidate()
+        demoApproachTimer = nil
+    }
+
+    // MARK: - Accelerating Sonar Beep + Heavy Haptic Heartbeat
+
+    private func updateSonar(for targetDistance: Float?) {
+        guard let dist = targetDistance, dist > 0.05, dist <= 5.0 else {
+            stopSonarPulse()
             return
         }
 
-        let clamped = max(0.1, min(2.0, dist))
-        let normalized = Double((clamped - 0.1) / 1.9)
-        let newInterval = 0.20 + (normalized * 1.0)
+        // Interval speeds up from 1.2s at 5.0m down to 0.15s at <= 0.3m
+        let clamped = max(0.3, min(5.0, dist))
+        let normalized = (clamped - 0.3) / 4.7
+        let newInterval = 0.15 + Double(normalized) * (1.20 - 0.15)
 
-        if hapticTimer == nil || abs(currentHapticInterval - newInterval) > 0.12 {
-            currentHapticInterval = newInterval
-            startHapticPulse(interval: newInterval)
+        if sonarTimer == nil || abs(currentSonarInterval - newInterval) > 0.08 {
+            currentSonarInterval = newInterval
+            startSonarPulse(interval: newInterval)
         }
     }
 
-    private func startHapticPulse(interval: TimeInterval) {
-        hapticTimer?.invalidate()
-        hapticTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+    private func startSonarPulse(interval: TimeInterval) {
+        sonarTimer?.invalidate()
+        sonarTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.hapticGenerator.impactOccurred()
+            self.triggerPulseTick()
         }
-        hapticGenerator.impactOccurred()
+        triggerPulseTick()
     }
 
-    private func stopHapticPulse() {
-        hapticTimer?.invalidate()
-        hapticTimer = nil
-        currentHapticInterval = 0
+    private func triggerPulseTick() {
+        // Heavy haptic feedback
+        hapticGenerator.impactOccurred(intensity: 1.0)
+
+        // Audible system sonar ping (1104 is a crisp navigation tap sound; 1052 is short tick)
+        AudioServicesPlaySystemSound(1104)
+
+        // Visual flash tick trigger
+        DispatchQueue.main.async {
+            self.pulseVisualTick.toggle()
+        }
+    }
+
+    private func stopSonarPulse() {
+        sonarTimer?.invalidate()
+        sonarTimer = nil
+        currentSonarInterval = 0
     }
 }
 
@@ -217,6 +308,8 @@ extension InteractionManager: NISessionDelegate {
         let matchedPeerName = peerSessions.first(where: { $0.value === session })?.key
 
         DispatchQueue.main.async {
+            guard !self.isDemoMode else { return }
+
             if let peerName = matchedPeerName {
                 let fallbackDir = self.peerMeasurements[peerName]?.direction ?? simd_float3(x: 0, y: 1, z: 0)
                 let resolvedDirection = peerObject.direction ?? fallbackDir
@@ -227,7 +320,7 @@ extension InteractionManager: NISessionDelegate {
                     self.activePeerName = peerName
                     self.distance = peerObject.distance
                     self.direction = resolvedDirection
-                    self.updateHaptics(for: peerObject.distance)
+                    self.updateSonar(for: peerObject.distance)
                 }
             }
         }
@@ -236,19 +329,23 @@ extension InteractionManager: NISessionDelegate {
     func session(_ session: NISession, didRemove nearbyObjects: [NINearbyObject], reason: NINearbyObject.RemovalReason) {
         let matchedPeerName = peerSessions.first(where: { $0.value === session })?.key
         DispatchQueue.main.async {
+            guard !self.isDemoMode else { return }
+
             if let peerName = matchedPeerName {
                 self.peerMeasurements[peerName] = (nil, nil)
                 if self.activePeerName == peerName {
                     self.distance = nil
                     self.direction = nil
-                    self.stopHapticPulse()
+                    self.stopSonarPulse()
                 }
             }
         }
     }
 
     func sessionWasSuspended(_ session: NISession) {
-        stopHapticPulse()
+        if !isDemoMode {
+            stopSonarPulse()
+        }
     }
 
     func sessionSuspensionEnded(_ session: NISession) {
