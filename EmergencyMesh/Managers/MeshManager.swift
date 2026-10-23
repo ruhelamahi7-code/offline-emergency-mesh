@@ -157,7 +157,7 @@ class MeshManager: NSObject, ObservableObject {
         session.disconnect()
     }
 
-    // MARK: - 3.5s Untethered Radio Keep-Alive Heartbeat
+    // MARK: - 3.5s Wireless Heartbeat (Keep-Alive)
 
     private func startHeartbeat() {
         heartbeatTimer?.invalidate()
@@ -179,8 +179,8 @@ class MeshManager: NSObject, ObservableObject {
             timestamp: Date(),
             ttl: 1,
             isEncrypted: false,
-            payload: Data([0x01]),
-            packetType: .heartbeat
+            payload: "PING".data(using: .utf8) ?? Data(),
+            packetType: .message
         )
 
         _ = registerPacketIfUnseen(id: ping.id)
@@ -339,7 +339,7 @@ extension MeshManager: MCNearbyServiceAdvertiserDelegate {
 
 extension MeshManager: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
-        print("Lost peer: \(peerID.displayName)")
+        print("[MeshManager] Lost peer: \(peerID.displayName)")
     }
 
     func browser(
@@ -347,11 +347,8 @@ extension MeshManager: MCNearbyServiceBrowserDelegate {
         foundPeer peerID: MCPeerID,
         withDiscoveryInfo info: [String: String]?
     ) {
-        let shouldInvite = myPeerID.displayName > peerID.displayName
-        if shouldInvite {
-            print("Inviting peer: \(peerID.displayName)")
-            browser.invitePeer(peerID, to: session, withContext: nil, timeout: 15)
-        }
+        print("[MeshManager] Found peer: \(peerID.displayName), issuing invitation...")
+        browser.invitePeer(peerID, to: session, withContext: nil, timeout: 15)
     }
 }
 
@@ -371,7 +368,6 @@ extension MeshManager: MCSessionDelegate {
             switch state {
             case .connected:
                 print("Connected to peer: \(peerID.displayName)")
-                // Pause aggressive browsing once connected to reduce 2.4GHz radio collisions; keep advertising active
                 if session.connectedPeers.count >= 1 {
                     self.serviceBrowser.stopBrowsingForPeers()
                 }
@@ -393,12 +389,12 @@ extension MeshManager: MCSessionDelegate {
                 self.receivedPeerTokens.removeValue(forKey: peerID.displayName)
                 self.onPeerDisconnected?(peerID)
 
-                // Trigger an auto-reconnect backoff (resume browsing after 1.5 seconds)
                 if session.connectedPeers.isEmpty {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                         guard let self = self, self.session.connectedPeers.isEmpty else { return }
-                        print("[MeshManager] Auto-reconnect triggered: resuming browsing...")
-                        self.serviceBrowser.startBrowsingForPeers()
+                        self.serviceBrowser.stopBrowsingForPeers()
+                        self.serviceAdvertiser.stopAdvertisingPeer()
+                        self.startNetworking()
                     }
                 }
 
@@ -445,6 +441,11 @@ extension MeshManager: MCSessionDelegate {
             messageText = decrypt(data: packet.payload, using: symmetricKey)
         } else {
             messageText = String(data: packet.payload, encoding: .utf8)
+        }
+
+        // Silently discard heartbeat PING packets
+        if let text = messageText, text == "PING" {
+            return
         }
 
         if let content = messageText {

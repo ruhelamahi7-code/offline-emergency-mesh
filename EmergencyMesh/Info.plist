@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>EmergencyMesh uses Bluetooth to discover and maintain peer-to-peer mesh connectivity offline.</string>
+	<string>EmergencyMesh uses Bluetooth to discover and connect with nearby peers in an offline emergency mesh.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>EmergencyMesh uses local Wi-Fi direct networking to keep the mesh active.</string>
+	<string>EmergencyMesh uses local mesh networking to discover and communicate with nearby devices offline.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>EmergencyMesh analyzes ambient sound waves in RAM to classify emergencies like alarms or screams.</string>
+	<string>EmergencyMesh uses the microphone on-device to classify emergency sounds such as fire alarms and screaming.</string>
 	<key>NSNearbyInteractionUsageDescription</key>
-	<string>EmergencyMesh uses Ultra Wideband to point directly to distressed peers.</string>
+	<string>EmergencyMesh uses Ultra Wideband to provide precise directional tracking and distance to distressed peers.</string>
 	<key>NSNearbyInteractionAllowOnceUsageDescription</key>
 	<string>EmergencyMesh uses Ultra Wideband to locate nearby peers in an emergency.</string>
 	<key>NSBonjourServices</key>
